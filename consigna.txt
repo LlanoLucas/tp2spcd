@@ -1,0 +1,128 @@
+
+tpseminario.png
+01  Objetivo
+
+En este segundo entregable del caso de estudio sobre análisis de datos de vinos, nos adentraremos en el uso de herramientas y técnicas específicas de análisis de datos utilizando R y Python, así como la introducción a la programación en Python y R para ciencia de datos.
+Este módulo se centra en capacitar a los participantes en el uso de R y Python para realizar análisis exploratorio de datos, procesamiento de datos y programación aplicada a la ciencia de datos. A través de ejercicios prácticos y aplicados al conjunto de datos de reseñas de vinos, exploraremos cómo estas herramientas pueden ser utilizadas para comprender mejor las características, tendencias y preferencias de los vinos.
+El análisis de datos con R y Python nos permitirá explorar la estructura de los datos, realizar estadísticas descriptivas, crear visualizaciones informativas y preparar los datos para análisis más avanzados. Además, la introducción a la programación en Python y R nos ayudará a desarrollar habilidades para manipular datos, resolver problemas y aplicar modelos analíticos que puedan revelar información valiosa para la industria del vino.
+Este trabajo práctico no solo busca fortalecer nuestras habilidades técnicas en análisis de datos y programación, sino también prepararnos para enfrentar nuevos desafíos en la extracción e interpretación de información relevante a partir de grandes volúmenes de datos.
+
+ 
+
+
+02  Situación problemática
+
+Lee con atención el siguiente caso teniendo presente cada uno de los contenidos que hemos desarrollado en el módulo. Una vez leído, tendrás que resolver preguntas cerradas en base al mismo. Haz clic sobre el siguiente enlace para descargar el enunciado:
+
+Click aquíDescargar Click aquí
+
+Documento extraDescargar Documento extra
+
+ 
+
+03  Consigna abierta
+
+Realizar un análisis exploratorio detallado del conjunto de datos de reseñas de vinos utilizando tanto R como Python. Este análisis nos permitirá comprender la estructura de los datos, identificar problemas potenciales y preparar los datos para análisis más avanzados.
+
+Carga del archivo:
+    • Utilizar R y Python para cargar el archivo winemag-data-130k-v2.csv.
+    • Revisar el formato del archivo, asegurándose de que se haya cargado correctamente.
+    • Verificar la cantidad de datos, número de columnas y tipos de datos presentes en el conjunto de datos.
+
+Análisis exploratorio de datos:
+    • Explorar la estructura general de los datos. ¿Qué variables están presentes? ¿Cuáles son las características principales del conjunto de datos?
+    • Realizar un resumen estadístico inicial de las variables numéricas y categóricas importantes.
+    • Explorar la distribución de las variables numéricas y categóricas mediante gráficos apropiados.
+
+Tratamiento de datos faltantes:
+    • Identificar y manejar los datos faltantes en el conjunto de datos. Justificando la elección
+    • Discutir y describir diferentes estrategias para manejar los datos faltantes.
+
+Análisis de datos atípicos:
+    • Detectar posibles valores atípicos en las variables numéricas relevantes.
+    • Evaluar la naturaleza y posible causa de estos valores atípicos.
+    • Analizar cómo los valores atípicos pueden afectar el análisis y las decisiones basadas en los datos.
+
+04  Formato entregable
+
+En este trabajo práctico deberá hacer entrega de 2 (dos) archivos. Por un lado, un informe detallando el análisis de lo realizado y, por otro lado, el código utilizado para la realización del análisis. 
+
+Script
+Formato del archivo:
+    • Prepara un archivo de script en R (.R) o Python (.py) según tu elección y habilidades. Por ejemplo, analisis_exploratorio_vinos.R o analisis_exploratorio_vinos.py.
+Organización del código:
+    • El código debe estar bien organizado en secciones lógicas que reflejen los pasos del análisis exploratorio: carga de datos, resumen estadístico, gráficos, tratamiento de datos faltantes, análisis de datos atípicos, respuestas a consignas específicas, etc.
+
+
+Comentarios y documentación:
+
+    • Incluye comentarios adecuados a lo largo del código para explicar cada paso, especialmente para funciones complejas o decisiones analíticas importantes.
+    • Asegúrate de que los nombres de las variables y funciones sean descriptivos y claros.
+Funcionalidad completa:
+    • El script debe ser completamente funcional y capaz de ejecutarse sin errores si se proporciona el archivo de datos winemag-data-130k-v2.csv.
+
+ 
+
+Informe en PDF
+Carátula:
+    • Título del informe: Debe ser claro y conciso.
+    • Nombre del autor(es): Incluir nombre completo.
+    • Fecha: Fecha de entrega o elaboración del informe.
+
+Índice:
+    • Enumeración de secciones y subsecciones del informe.
+    • Incluir el número de página correspondiente.
+
+Cuerpo del Informe:
+    • Tipo de letra: Preferiblemente Times New Roman o Arial.
+    • Tamaño de letra: 12 puntos para texto principal, 14 puntos para títulos principales.
+    • Interlineado: 1.5 líneas para el cuerpo del texto.
+    • Márgenes: Ajustar a 2.5 cm en todos los lados.
+    • Sangrías: Utilizar sangría de 1.27 cm (0.5 pulgadas) para el inicio de cada párrafo.
+    • Encabezado y pie de página:
+            ▪ Encabezado: Incluir el título del informe o el nombre del proyecto.
+            ▪ Pie de página: Número de página y otra información relevante, como el nombre del autor o la fecha.
+
+ 
+
+Otros aspectos significativos:
+    • Numeración de páginas: Iniciar numeración en la página del índice.
+    • Formato de títulos y subtítulos: Utilizar negrita para títulos y cursiva para subtítulos.
+    • Referencias: Si es necesario, seguir el formato APA o el indicado por la institución.
+    • Anexos: Incluir al final del informe si es necesario.
+
+Una rúbrica (1)
+Criterios	Calificaciones	Puntos
+Complejidad del análisis exploratorio. Porcentaje 35%.
+
+Realiza un análisis detallado y profundo de múltiples aspectos del conjunto de datos, incluyendo estadísticas descriptivas avanzadas, visualizaciones complejas y análisis comparativo entre variables clave.
+35 pts
+
+Realiza un análisis adecuado del conjunto de datos, abordando los principales aspectos como estadísticas descriptivas y visualizaciones, aunque con menos profundidad y detalle que el nivel máximo.
+15 pts
+
+El análisis exploratorio es básico y se limita a estadísticas descriptivas simples y visualizaciones elementales sin explorar múltiples aspectos o relaciones complejas.
+5 pts
+/35 pts
+Manejo de datos faltantes y atípicos. Porcentaje 35%.
+
+Maneja de manera excelente los datos faltantes y atípicos, utilizando métodos avanzados de imputación y técnicas efectivas de detección y tratamiento de valores atípicos.
+35 pts
+
+Maneja adecuadamente los datos faltantes y atípicos, utilizando métodos convencionales de imputación y técnicas estándar de detección y tratamiento de valores atípicos.
+15 pts
+
+Presenta deficiencias en el manejo de datos faltantes y atípicos, con estrategias limitadas o ausencia de tratamiento efectivo.
+5 pts
+/35 pts
+Presentación y documentación del código. Porcentaje 30%.
+
+El código está perfectamente estructurado y documentado, con comentarios detallados que explican claramente cada paso del análisis y facilitan la comprensión y reproducibilidad del trabajo.
+30 pts
+
+El código está bien organizado y documentado, con comentarios adecuados que describen la mayoría de los pasos del análisis, aunque con algunos detalles faltantes o poco claros.
+15 pts
+
+El código es difícil de seguir o está mal documentado, con comentarios mínimos o ausentes, dificultando la comprensión y revisión del análisis realizado.
+5 pts
+/30 pts
