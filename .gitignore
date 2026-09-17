@@ -1,0 +1,12 @@
+# Jupyter
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Windows / OneDrive
+desktop.ini
+Thumbs.db
