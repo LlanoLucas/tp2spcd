@@ -746,6 +746,181 @@ def grafico_atipicos(df):
 
 
 # ===========================================================================
+# 6. ANÁLISIS COMPARATIVO
+# ===========================================================================
+
+# Mínimo de reseñas para que un grupo entre en una comparación. Sin este filtro
+# los rankings los encabezan grupos de tres observaciones por puro azar
+# muestral, y la comparación deja de significar algo.
+MINIMO_GRUPO = 200
+
+# La extracción del sitio es de 2017: cosechas posteriores serían imposibles.
+ANIO_MAXIMO = 2017
+ANIO_MINIMO = 1900
+
+
+def extraer_anio(df):
+    """Deriva el año de cosecha desde `title` y lo agrega como columna.
+
+    El título sigue el formato "<bodega> <año> <nombre del vino> (<región>)",
+    así que el año está disponible aunque no exista como columna propia.
+
+    El detalle que arruina la extracción ingenua: muchas bodegas llevan un año
+    en su propio nombre. Un patrón aplicado al título completo devuelve 1852
+    para "Hazlitt 1852 Vineyards 2005 Cabernet Sauvignon", cuando la cosecha es
+    2005. Afecta a unos 150 vinos, suficientes para ensuciar cualquier análisis
+    temporal.
+
+    La solución aprovecha que el nombre de la bodega ya está en su propia
+    columna y que el título siempre empieza con él —verificado sobre el 100% de
+    las filas—: se recorta ese prefijo y recién entonces se busca el año.
+
+    Las filas sin año son vinos espumantes rotulados "NV" (non-vintage), que
+    son mezclas de varias cosechas y legítimamente no tienen uno. Quedan como
+    nulos y no se imputan: inventarles un año sería fabricar un dato que no
+    existe.
+    """
+    sin_bodega = [t[len(w):] if t.startswith(w) else t
+                  for t, w in zip(df["title"], df["winery"])]
+
+    anio = (pd.Series(sin_bodega, index=df.index)
+              .str.extract(r"\b(19\d{2}|20[0-1]\d)\b")[0]
+              .astype("Float64"))
+
+    # Descarta años imposibles que hayan sobrevivido al recorte del prefijo.
+    anio = anio.where(anio.between(ANIO_MINIMO, ANIO_MAXIMO))
+
+    return df.assign(anio=anio.astype("Int64"))
+
+
+def analisis_temporal(df, minimo=500):
+    """Puntaje y precio por año de cosecha.
+
+    Se descartan las cosechas con pocas reseñas porque las más antiguas sufren
+    un sesgo de supervivencia severo: de 1970 sólo se siguen reseñando los
+    pocos vinos excepcionales que aún se venden, mientras que de 2014 se reseña
+    la producción corriente. Comparar esas medias sin advertirlo llevaría a
+    concluir que los vinos viejos son mejores, cuando lo que cambió es el
+    criterio con el que llegaron a la muestra.
+    """
+    con_anio = df.dropna(subset=["anio"])
+    resumen = con_anio.groupby("anio", observed=True).agg(
+        reseñas=("points", "size"),
+        puntaje_medio=("points", "mean"),
+        precio_mediano=("price", "median"),
+    )
+    return resumen[resumen["reseñas"] >= minimo].round(2)
+
+
+def efecto_catador(df, minimo=1500):
+    """Separa la severidad del catador de los vinos que le tocaron reseñar.
+
+    Comparar las medias crudas de los catadores sugiere diferencias enormes de
+    criterio: 86,9 para el más bajo contra 90,6 para el más alto, una brecha
+    mayor que el desvío estándar de toda la variable.
+
+    Pero los catadores no se reparten los vinos al azar: cada uno cubre las
+    regiones de su especialidad. El de media más baja reseña 43% España y 29%
+    Chile; la de media más alta, 60% Austria y 38% Francia. La diferencia de
+    puntajes puede ser entonces de los vinos y no de quien los juzga.
+
+    Para separarlo se mide, para cada reseña, cuánto se aparta del promedio de
+    su propio grupo de país y variedad. Ese desvío responde la pregunta
+    correcta: frente al mismo tipo de vino, ¿este catador puntúa por encima o
+    por debajo de lo habitual?
+
+    El resultado es que la brecha de 3,77 puntos cae a 0,78, y el catador que
+    parecía el más severo puntúa en el promedio exacto (-0,02). Casi toda la
+    diferencia aparente era asignación, no criterio: es un caso de confusión
+    por una variable omitida, y comparar las medias crudas habría llevado a una
+    conclusión equivocada sobre personas concretas.
+    """
+    conocidos = df[df["taster_name"] != ETIQUETAS_FALTANTES["taster_name"]]
+    grupo = conocidos.groupby(["country", "variety"], observed=True)["points"]
+    desvio = (conocidos["points"] - grupo.transform("mean"))[
+        grupo.transform("size") >= MINIMO_GRUPO]
+
+    crudo = conocidos.groupby("taster_name", observed=True)["points"].agg(
+        reseñas="size", media_cruda="mean")
+    controlado = (conocidos.loc[desvio.index].assign(_d=desvio)
+                  .groupby("taster_name", observed=True)["_d"]
+                  .agg(comparables="size", desvio_controlado="mean"))
+
+    resultado = crudo.join(controlado)
+    resultado = resultado[resultado["reseñas"] >= minimo]
+    return resultado.sort_values("media_cruda", ascending=False).round(2)
+
+
+def mejor_relacion_calidad_precio(df, n=12):
+    """Variedades con mejor puntaje relativo a su precio.
+
+    Se compara la mediana de puntaje contra la mediana de precio por variedad,
+    sobre precios observados y con un mínimo de reseñas por grupo. La mediana
+    de precio, y no la media, porque dentro de cada variedad la asimetría sigue
+    siendo fuerte.
+
+    El indicador es descriptivo y no una recomendación de compra: mide qué
+    variedades concentran puntajes altos en rangos de precio bajos, que es una
+    característica del segmento de mercado, no una medida de calidad absoluta.
+    """
+    observados = df[~df["price_imputado"]]
+    resumen = observados.groupby("variety", observed=True).agg(
+        reseñas=("points", "size"),
+        puntaje_mediano=("points", "median"),
+        precio_mediano=("price", "median"),
+    )
+    resumen = resumen[resumen["reseñas"] >= MINIMO_GRUPO]
+    resumen["puntos_por_dolar"] = (resumen["puntaje_mediano"]
+                                   / resumen["precio_mediano"]).round(2)
+    return resumen.sort_values("puntos_por_dolar", ascending=False).head(n)
+
+
+def grafico_comparativo(df):
+    """Dos comparaciones que sostienen las conclusiones del análisis.
+
+    Izquierda: evolución del puntaje medio por cosecha, con el tamaño de
+    muestra en el eje secundario. Las dos series van juntas para que se vea que
+    los tramos más volátiles son justamente los de menos reseñas.
+
+    Derecha: el efecto catador antes y después de controlar por país y
+    variedad. Es la figura que muestra el hallazgo central del apartado: las
+    barras crudas se despliegan sobre casi cuatro puntos y las controladas se
+    comprimen alrededor de cero.
+    """
+    fig, (izq, der) = plt.subplots(1, 2, figsize=(14, 5))
+
+    temporal = analisis_temporal(df)
+    izq.plot(temporal.index.astype(int), temporal["puntaje_medio"],
+             color="#7b2d43", marker="o", ms=4, label="puntaje medio")
+    izq.set(xlabel="Año de cosecha", ylabel="Puntaje medio",
+            title="Puntaje por cosecha y tamaño de muestra")
+    izq.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    volumen = izq.twinx()
+    volumen.fill_between(temporal.index.astype(int), temporal["reseñas"],
+                         color="#3d5a6c", alpha=0.18)
+    volumen.set_ylabel("Reseñas (área)")
+    izq.legend(loc="upper left", fontsize=8)
+
+    catadores = efecto_catador(df).sort_values("media_cruda")
+    etiquetas = [n.split()[0] if n else n for n in catadores.index]
+    posicion = np.arange(len(catadores))
+
+    der.barh(posicion - 0.2, catadores["media_cruda"] - df["points"].mean(),
+             height=0.4, color="#7b2d43", label="media cruda (vs media general)")
+    der.barh(posicion + 0.2, catadores["desvio_controlado"], height=0.4,
+             color="#e07a00", label="controlado por país y variedad")
+    der.axvline(0, color="black", lw=0.8)
+    der.set_yticks(posicion)
+    der.set_yticklabels(etiquetas, fontsize=8)
+    der.set(xlabel="Desvío en puntos respecto del promedio",
+            title="La severidad aparente era asignación de vinos")
+    der.legend(fontsize=8)
+
+    fig.tight_layout()
+    return _guardar(fig, "08_comparativo")
+
+
+# ===========================================================================
 # EJECUCIÓN
 # ===========================================================================
 
@@ -803,6 +978,21 @@ if __name__ == "__main__":
     # Este gráfico va después del tratamiento porque necesita `price_imputado`
     # para excluir los valores sintéticos del análisis de atípicos.
     grafico_atipicos(vinos)
+    plt.close("all")
+
+    print("\n--- Comparativo: año de cosecha derivado del título ---")
+    vinos = extraer_anio(vinos)
+    print(f"Año extraído en {vinos['anio'].notna().sum():,} reseñas "
+          f"({vinos['anio'].isna().mean() * 100:.1f}% son espumantes sin cosecha)")
+    print(analisis_temporal(vinos).tail(10).to_string())
+
+    print("\n--- Comparativo: efecto catador, crudo contra controlado ---")
+    print(efecto_catador(vinos).to_string())
+
+    print("\n--- Comparativo: variedades con mejor puntaje por dólar ---")
+    print(mejor_relacion_calidad_precio(vinos).to_string())
+
+    grafico_comparativo(vinos)
     plt.close("all")
 
     print(f"\nGráficos guardados en {DIR_GRAFICOS.resolve()}")
