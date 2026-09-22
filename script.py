@@ -15,6 +15,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN
@@ -548,6 +549,203 @@ def grafico_faltantes(df):
 
 
 # ===========================================================================
+# 5. ANÁLISIS DE DATOS ATÍPICOS
+# ===========================================================================
+
+# Un precio se considera sospechoso cuando supera en este factor a la mediana
+# de su grupo de pares. El umbral sale de la distribución observada de ratios:
+# el percentil 99,9 está en 7,3x, así que 10x deja fuera del alcance a la
+# variación legítima de mercado y sólo alcanza a casos que exigen explicación.
+UMBRAL_RATIO_PARES = 10
+
+# Mínimo de vinos que debe tener un grupo de pares para que su mediana sirva
+# como referencia. Con menos, la mediana es demasiado inestable.
+MINIMO_GRUPO_PARES = 30
+
+
+def detectar_atipicos(df):
+    """Compara métodos de detección de atípicos sobre las variables numéricas.
+
+    Se aplican cuatro criterios a propósito, porque discrepan y la discrepancia
+    es el hallazgo:
+
+    - IQR clásico: asume distribución aproximadamente simétrica. Sobre `price`
+      marca el 6,2% de los datos, lo que no describe casos excepcionales sino
+      la cola natural de una distribución asimétrica.
+    - z-score: asume normalidad, y además usa media y desvío, que son
+      justamente los estadísticos que los atípicos distorsionan. El resultado
+      es circular y sub-detecta.
+    - z modificado sobre la MAD: reemplaza media y desvío por mediana y
+      desviación absoluta mediana, que los valores extremos no arrastran.
+    - IQR sobre log(price): aplica el criterio sobre la escala en la que la
+      variable sí es simétrica. Es el más defendible para esta variable.
+
+    Sólo se usan precios observados: incluir los imputados mezclaría valores
+    sintéticos, que por construcción están cerca de la mediana de su grupo y
+    nunca serían atípicos.
+    """
+    observados = df[~df["price_imputado"]]
+    filas = {}
+
+    for variable in ["price", "points"]:
+        x = observados[variable]
+        q1, q3 = x.quantile([0.25, 0.75])
+        iqr = q3 - q1
+        z = (x - x.mean()) / x.std()
+        mad = (x - x.median()).abs().median()
+        z_mod = 0.6745 * (x - x.median()) / mad
+        log_x = np.log(x)
+        lq1, lq3 = log_x.quantile([0.25, 0.75])
+        liqr = lq3 - lq1
+
+        filas[variable] = {
+            "IQR clásico": ((x < q1 - 1.5 * iqr) | (x > q3 + 1.5 * iqr)).mean() * 100,
+            "z-score |z|>3": (z.abs() > 3).mean() * 100,
+            "z modificado (MAD) |z|>3.5": (z_mod.abs() > 3.5).mean() * 100,
+            "IQR sobre log(x)": ((log_x < lq1 - 1.5 * liqr)
+                                 | (log_x > lq3 + 1.5 * liqr)).mean() * 100,
+        }
+
+    return pd.DataFrame(filas).round(2).rename_axis("% marcado como atípico")
+
+
+def atipicos_contextuales(df, umbral=UMBRAL_RATIO_PARES):
+    """Identifica precios implausibles comparando cada vino con sus pares.
+
+    Los métodos estadísticos del apartado anterior sólo responden "¿es un valor
+    extremo?". La pregunta que pide la consigna es otra: "¿es un error?". Y esa
+    no se contesta mirando la distribución global, porque un Château Pétrus a
+    $2.500 es extremo y correcto, mientras que un Médoc corriente a $3.300 es
+    igual de extremo y es un error de carga.
+
+    La diferencia sólo aparece en contexto. Se compara cada precio con la
+    mediana de su grupo de pares —misma provincia y mismo puntaje— y se
+    reporta el cociente. Un vino caro entre vinos caros da un ratio cercano a
+    1; un vino caro entre vinos baratos se delata.
+
+    Devuelve los casos por encima del umbral, ordenados por ratio, para
+    inspección manual. Es deliberado que no los corrija de forma automática:
+    decidir si un precio es erróneo requiere criterio, y la función entrega la
+    evidencia para ejercerlo.
+    """
+    observados = df[~df["price_imputado"]]
+    grupo = observados.groupby(["province", "points"], observed=True)["price"]
+    mediana_pares = grupo.transform("median")
+    tamaño = grupo.transform("size")
+
+    confiable = tamaño >= MINIMO_GRUPO_PARES
+    ratio = (observados["price"] / mediana_pares)[confiable]
+
+    sospechosos = observados.loc[ratio[ratio > umbral].index].copy()
+    sospechosos["mediana_pares"] = mediana_pares[sospechosos.index]
+    sospechosos["ratio"] = ratio[sospechosos.index].round(1)
+
+    columnas = ["title", "province", "points", "price", "mediana_pares", "ratio"]
+    return sospechosos[columnas].sort_values("ratio", ascending=False)
+
+
+def impacto_atipicos(df):
+    """Mide cómo cambia la relación precio-puntaje según se traten los atípicos.
+
+    Es la parte de la consigna que pide analizar cómo los valores atípicos
+    afectan las decisiones basadas en los datos, y el resultado es contundente.
+
+    Pearson mide asociación *lineal*, así que sobre un precio con asimetría 18
+    subestima la relación real. Spearman trabaja sobre rangos y es insensible a
+    la escala, por eso apenas se mueve entre escenarios: es la referencia
+    robusta contra la cual comparar.
+
+    La conclusión práctica es que eliminar atípicos y transformar la escala no
+    son dos caminos igual de buenos hacia el mismo lugar. Descartar los precios
+    altos sube el Pearson pero elimina decenas de miles de vinos reales; el
+    logaritmo alcanza un valor todavía mayor sin perder una sola observación.
+    Para esta variable, la respuesta correcta a la asimetría es cambiar de
+    escala, no recortar los datos.
+
+    Se excluye del cálculo el precio imputado, que se generó usando `points` y
+    por lo tanto inflaría artificialmente cualquier correlación con esa misma
+    variable.
+    """
+    observados = df[~df["price_imputado"]]
+    precio, puntaje = observados["price"], observados["points"]
+
+    q1, q3 = precio.quantile([0.25, 0.75])
+    limite = q3 + 1.5 * (q3 - q1)
+    recortado = observados[precio <= limite]
+
+    escenarios = {
+        "precio crudo, con atípicos": (precio, puntaje),
+        "precio crudo, sin atípicos (IQR)": (recortado["price"], recortado["points"]),
+        "log(precio), con atípicos": (np.log(precio), puntaje),
+    }
+
+    filas = {}
+    for nombre, (x, y) in escenarios.items():
+        filas[nombre] = {
+            "n": len(x),
+            "Pearson": stats.pearsonr(x, y)[0],
+            "Spearman": stats.spearmanr(x, y)[0],
+        }
+    resultado = pd.DataFrame(filas).T
+    resultado["n"] = resultado["n"].astype(int)
+    return resultado.round(3)
+
+
+def grafico_atipicos(df):
+    """Panorama de los atípicos de precio y del criterio usado para juzgarlos.
+
+    Izquierda: la cola de precios en escala logarítmica, con los umbrales de
+    los dos criterios que más discrepan, para hacer visible que sobre una
+    variable asimétrica el IQR clásico marca la cola entera y no casos raros.
+
+    Derecha: la distribución del cociente contra el grupo de pares. Es el
+    gráfico que justifica el umbral elegido, porque muestra que la masa se
+    concentra alrededor de 1 y que por encima de 10 quedan unos pocos casos
+    separados del resto.
+    """
+    observados = df[~df["price_imputado"]]
+    precio = observados["price"]
+
+    fig, (izq, der) = plt.subplots(1, 2, figsize=(13, 4.5))
+
+    q1, q3 = precio.quantile([0.25, 0.75])
+    limite_iqr = q3 + 1.5 * (q3 - q1)
+    log_p = np.log(precio)
+    lq1, lq3 = log_p.quantile([0.25, 0.75])
+    limite_log = np.exp(lq3 + 1.5 * (lq3 - lq1))
+
+    izq.hist(precio, bins=np.logspace(np.log10(precio.min()),
+                                      np.log10(precio.max()), 70),
+             color="#3d5a6c", edgecolor="white")
+    izq.set_xscale("log")
+    izq.axvline(limite_iqr, color="#c8102e", ls="--",
+                label=f"IQR clásico: ${limite_iqr:.0f} ({(precio > limite_iqr).mean() * 100:.1f}%)")
+    izq.axvline(limite_log, color="#e07a00", ls="--",
+                label=f"IQR sobre log: ${limite_log:.0f} ({(precio > limite_log).mean() * 100:.1f}%)")
+    izq.set(xlabel="Precio (USD, escala log)", ylabel="Cantidad de reseñas",
+            title="Dos criterios, seis veces de diferencia")
+    izq.legend(fontsize=8)
+
+    grupo = observados.groupby(["province", "points"], observed=True)["price"]
+    ratio = (observados["price"] / grupo.transform("median"))[
+        grupo.transform("size") >= MINIMO_GRUPO_PARES]
+
+    der.hist(ratio, bins=np.logspace(np.log10(ratio.min()), np.log10(ratio.max()), 70),
+             color="#7b2d43", edgecolor="white")
+    der.set_xscale("log")
+    der.set_yscale("log")
+    der.axvline(UMBRAL_RATIO_PARES, color="#c8102e", ls="--",
+                label=f"umbral {UMBRAL_RATIO_PARES}x ({(ratio > UMBRAL_RATIO_PARES).sum()} casos)")
+    der.set(xlabel="Precio / mediana del grupo de pares (provincia + puntaje)",
+            ylabel="Cantidad de reseñas",
+            title="Contra los pares, los errores se separan del resto")
+    der.legend(fontsize=8)
+
+    fig.tight_layout()
+    return _guardar(fig, "07_atipicos")
+
+
+# ===========================================================================
 # EJECUCIÓN
 # ===========================================================================
 
@@ -566,13 +764,15 @@ if __name__ == "__main__":
     print("\n--- Depuración ---")
     vinos = quitar_duplicados(vinos)
 
-    print("\n--- Gráficos ---")
+    # Estos gráficos se generan ANTES del tratamiento de faltantes: el mapa de
+    # nulos necesita ver los nulos, y los demás describen los datos tal como
+    # llegaron, sin valores imputados mezclados.
+    print("\n--- Gráficos sobre los datos sin imputar ---")
     for funcion in (grafico_puntajes, grafico_precios, grafico_categoricas,
                     grafico_precio_vs_puntaje, grafico_puntaje_por_pais,
                     grafico_faltantes):
         funcion(vinos)
         plt.close("all")
-    print(f"Guardados en {DIR_GRAFICOS.resolve()}")
 
     print("\n--- Faltantes: diagnóstico del mecanismo ---")
     por_pais, por_puntaje = diagnostico_faltantes(vinos)
@@ -590,3 +790,19 @@ if __name__ == "__main__":
     print(f"Precios imputados: {vinos['price_imputado'].sum():,} "
           f"({vinos['price_imputado'].mean() * 100:.1f}%)")
     print(f"Nulos restantes en el dataset: {vinos.isna().sum().sum()}")
+
+    print("\n--- Atípicos: comparación de criterios de detección ---")
+    print(detectar_atipicos(vinos).to_string())
+
+    print("\n--- Atípicos: precios implausibles contra su grupo de pares ---")
+    print(atipicos_contextuales(vinos).head(6).to_string(index=False))
+
+    print("\n--- Atípicos: impacto sobre la relación precio-puntaje ---")
+    print(impacto_atipicos(vinos).to_string())
+
+    # Este gráfico va después del tratamiento porque necesita `price_imputado`
+    # para excluir los valores sintéticos del análisis de atípicos.
+    grafico_atipicos(vinos)
+    plt.close("all")
+
+    print(f"\nGráficos guardados en {DIR_GRAFICOS.resolve()}")
