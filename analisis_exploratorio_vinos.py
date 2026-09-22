@@ -1,13 +1,14 @@
 """
-Análisis exploratorio de datos — Reseñas de vinos (WineEnthusiast)
-Trabajo Práctico 2 — Seminario de Programación para Ciencia de Datos
+Análisis exploratorio de datos de reseñas de vinos (WineEnthusiast)
+Trabajo Práctico 2, Seminario de Programación para Ciencia de Datos
 
 Autor: Lucas Llano
 
 Requisitos: pandas, numpy, matplotlib, seaborn, scipy
-Uso:        python script.py
+Uso:        python analisis_exploratorio_vinos.py
 """
 
+import csv
 import io
 import re
 from pathlib import Path
@@ -21,14 +22,23 @@ from scipy import stats
 # CONFIGURACIÓN
 # ---------------------------------------------------------------------------
 
-# La consigna pide cargar "winemag-data-130k-v2.csv", pero el archivo que se
-# entregó junto al enunciado es un .xlsx. No es un Excel con datos tabulados:
-# es ese mismo CSV que pasó por una importación mal configurada en Excel.
-# La sección 1 documenta y revierte ese daño.
-RUTA_DATOS = "Entregable 2 - Documentación extra.xlsx"
+# El script acepta las dos formas en que puede llegar el dataset y elige el
+# camino según la extensión:
+#
+#   .csv   el archivo original, que se lee directo.
+#   .xlsx  el archivo que vino con el enunciado, que no es una hoja de cálculo
+#          sino ese mismo CSV dañado por una importación mal configurada en
+#          Excel. La sección 1 documenta y revierte ese daño.
+#
+# Se buscan en orden: el primero que exista es el que se usa.
+RUTAS_POSIBLES = [
+    "winemag-data-130k-v2.csv",
+    "Entregable 2 - Documentación extra.xlsx",
+]
 
-# Cantidad de campos que debe tener cada línea del CSV original:
-# 13 columnas de datos + 1 columna de índice sin nombre que quedó al exportar.
+# Campos que debe tener cada línea del CSV: 13 columnas de datos más la columna
+# de índice sin nombre que quedó al exportar. Es la condición que verifica si la
+# reconstrucción del archivo dañado salió bien.
 CAMPOS_POR_LINEA = 14
 
 
@@ -43,7 +53,7 @@ def _reconstruir_lineas(ruta):
     hecho: el CSV se abrió en Excel con una configuración regional que usa el
     punto y coma como separador de campos.
 
-    Problema 1 — Delimitador equivocado.
+    Problema 1. Delimitador equivocado.
         Excel recorrió cada línea buscando ';' y cortó ahí, repartiendo el
         contenido en varias celdas y descartando el separador. Como el CSV real
         está delimitado por comas, el 96% de las líneas no contenía ningún ';'
@@ -51,7 +61,7 @@ def _reconstruir_lineas(ruta):
         punto y coma dentro de alguna descripción) quedaron partidas.
         Se revierte volviendo a unir las celdas no vacías con ';'.
 
-    Problema 2 — Reseñas repartidas en varias filas.
+    Problema 2. Reseñas repartidas en varias filas.
         Cuatro descripciones contenían saltos de línea reales, y al importarlas
         quedaron distribuidas en más de una fila de la hoja. Se detectan porque
         toda línea de datos sana empieza con el índice numérico seguido de coma
@@ -81,7 +91,18 @@ def _reconstruir_lineas(ruta):
         else:
             unidas[-1] += "\n" + linea
 
-    return "\n".join(unidas)
+    texto = "\n".join(unidas)
+
+    # El criterio de éxito se fija antes de cargar, no después: si la
+    # reconstrucción es correcta, toda línea da CAMPOS_POR_LINEA campos al
+    # analizarse como CSV. Se usa csv.reader y no split(",") porque las
+    # descripciones tienen comas dentro de comillas.
+    anchos = {len(campos) for campos in csv.reader(io.StringIO(texto))}
+    assert anchos == {CAMPOS_POR_LINEA}, (
+        f"la reconstrucción falló: se esperaban {CAMPOS_POR_LINEA} campos por "
+        f"línea y se encontraron anchos {sorted(anchos)}")
+
+    return texto
 
 
 def _reparar_codificacion(texto):
@@ -91,32 +112,67 @@ def _reparar_codificacion(texto):
     'AlbariÃ±o'. Ocurre cuando bytes UTF-8 se interpretan byte a byte con la
     codificación de Windows Europa Occidental.
 
-    La reversión es exacta: se vuelve a codificar el texto en cp1252 para
-    recuperar los bytes originales y se decodifica como UTF-8, que es lo que
-    siempre fueron. Si alguno de los dos pasos falla, el valor se devuelve sin
-    tocar en lugar de corromperlo más. Esto deja 134 celdas sin reparar sobre
-    106.611 afectadas: son comillas tipográficas cuya secuencia de bytes incluye
-    posiciones que cp1252 no define.
-
-    La función es segura sobre texto ya correcto: un string ASCII atraviesa el
-    ida y vuelta sin cambios, y uno con acentos legítimos falla al decodificar y
-    se devuelve intacto.
+    La vuelta atrás es exacta: se codifica el texto en cp1252 para recuperar los
+    bytes originales y se decodifica como UTF-8, que es lo que siempre fueron.
+    Si cualquiera de los dos pasos falla, el valor vuelve sin tocar en lugar de
+    corromperse más. Quedan así 132 celdas sin reparar sobre 106.611 afectadas:
+    son comillas tipográficas cuya secuencia de bytes usa posiciones que cp1252
+    no define.
     """
     if not isinstance(texto, str):
         return texto
-    try:
-        return texto.encode("cp1252").decode("utf-8")
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        return texto
+
+    # Tres celdas pasaron dos veces por la conversión equivocada y quedaron con
+    # mojibake sobre mojibake: "crème" aparece como "crÃƒÂ¨me", y una sola
+    # vuelta la deja en "crÃ¨me", todavía rota. Se repite hasta que el texto
+    # deje de cambiar.
+    #
+    # El ciclo siempre termina: cada vuelta que tiene efecto acorta el texto,
+    # porque el mojibake usa más caracteres que el original. Y no puede pasarse
+    # de largo sobre texto ya correcto: "Gewürztraminer" da los bytes de cp1252
+    # 'Gew\xfcrztraminer', que no son UTF-8 válido, así que falla y se devuelve
+    # intacto. El tope es una red de seguridad, no parte de la lógica.
+    for _ in range(5):
+        try:
+            candidato = texto.encode("cp1252").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return texto
+        if candidato == texto:
+            return texto
+        texto = candidato
+
+    return texto
 
 
-def cargar_datos(ruta=RUTA_DATOS):
-    """Carga el dataset de reseñas y devuelve un DataFrame verificado."""
-    texto = _reconstruir_lineas(ruta)
+def _elegir_ruta():
+    """Devuelve el primer archivo de datos que exista entre los aceptados."""
+    for candidata in RUTAS_POSIBLES:
+        if Path(candidata).exists():
+            return candidata
+    raise FileNotFoundError(
+        "No se encontró el archivo de datos. Se buscaron, en este orden: "
+        + ", ".join(RUTAS_POSIBLES))
+
+
+def cargar_datos(ruta=None):
+    """Carga el dataset de reseñas y devuelve un DataFrame verificado.
+
+    Acepta tanto el CSV original como el .xlsx dañado que vino con el enunciado,
+    y elige qué hacer según la extensión. El CSV se lee directo; el .xlsx pasa
+    antes por la reconstrucción de `_reconstruir_lineas`.
+
+    Los dos caminos terminan en el mismo lugar: la reparación de codificación se
+    aplica igual, porque es inocua sobre texto que ya está bien, y las mismas
+    aserciones verifican el resultado venga de donde venga.
+    """
+    ruta = ruta or _elegir_ruta()
 
     # index_col=0 adopta la columna de índice heredada del CSV como índice del
     # DataFrame, en vez de arrastrarla como una columna de datos redundante.
-    df = pd.read_csv(io.StringIO(texto), index_col=0)
+    if str(ruta).lower().endswith(".csv"):
+        df = pd.read_csv(ruta, index_col=0)
+    else:
+        df = pd.read_csv(io.StringIO(_reconstruir_lineas(ruta)), index_col=0)
 
     for columna in df.select_dtypes(exclude="number").columns:
         df[columna] = df[columna].map(_reparar_codificacion)
@@ -154,6 +210,50 @@ def perfil_columnas(df):
         "unicos": df.nunique(),
         "cardinalidad_%": (df.nunique() / len(df) * 100).round(2),
     }).sort_values("nulos_%", ascending=False)
+
+
+def resumen_categoricas(df, columnas=None):
+    """Resumen estadístico de las variables categóricas.
+
+    Las medidas de tendencia central y dispersión que sirven para una variable
+    numérica no tienen sentido acá: no hay promedio de países ni desvío de
+    variedades. El equivalente para una categórica son la moda, su peso
+    relativo y alguna medida de cuán repartida está la masa entre categorías.
+
+    La entropía normalizada cumple ese papel. Vale 0 cuando todas las reseñas
+    caen en una sola categoría y 1 cuando se reparten en partes iguales, así que
+    compara concentración entre variables con distinta cantidad de categorías.
+    Es lo que distingue a `country`, donde unos pocos países se llevan casi
+    todo, de `winery`, donde 16.757 bodegas se reparten el conjunto de forma
+    pareja.
+
+    Se excluye el texto libre (`description`, `title`): con más del 90% de
+    valores únicos, su moda aparece dos o tres veces y no dice nada.
+    """
+    if columnas is None:
+        columnas = ["country", "province", "region_1", "region_2", "variety",
+                    "winery", "designation", "taster_name"]
+
+    filas = {}
+    for col in columnas:
+        valores = df[col].dropna()
+        frecuencias = valores.value_counts()
+        proporciones = frecuencias / len(valores)
+
+        # Entropía de Shannon dividida por su máximo posible, log(k).
+        entropia = -(proporciones * np.log(proporciones)).sum()
+        maxima = np.log(len(frecuencias)) if len(frecuencias) > 1 else 1
+
+        filas[col] = {
+            "categorías": len(frecuencias),
+            "moda": frecuencias.index[0],
+            "frec_moda": int(frecuencias.iloc[0]),
+            "moda_%": round(proporciones.iloc[0] * 100, 1),
+            "top10_%": round(frecuencias.head(10).sum() / len(valores) * 100, 1),
+            "entropía_norm": round(entropia / maxima, 3),
+        }
+
+    return pd.DataFrame(filas).T
 
 
 def quitar_duplicados(df):
@@ -240,7 +340,7 @@ def grafico_precios(df):
 
     izq.hist(precio, bins=100, color="#7b2d43", edgecolor="white")
     izq.set(xlabel="Precio (USD)", ylabel="Cantidad de reseñas",
-            title=f"Escala lineal — asimetría {precio.skew():.1f}")
+            title=f"Escala lineal: asimetría {precio.skew():.1f}")
 
     der.hist(precio, bins=np.logspace(np.log10(precio.min()), np.log10(precio.max()), 60),
              color="#3d5a6c", edgecolor="white")
@@ -249,7 +349,7 @@ def grafico_precios(df):
     der.text(precio.median() * 1.1, der.get_ylim()[1] * 0.9,
              f"mediana ${precio.median():.0f}", color="#c8102e", fontsize=9)
     der.set(xlabel="Precio (USD, escala log)", ylabel="",
-            title=f"Escala logarítmica — asimetría {np.log(precio).skew():.2f}")
+            title=f"Escala logarítmica: asimetría {np.log(precio).skew():.2f}")
 
     fig.suptitle("La misma variable bajo dos escalas", y=1.02)
     return _guardar(fig, "02_distribucion_precios")
@@ -272,7 +372,7 @@ def grafico_categoricas(df, n=15):
         cobertura = vc.sum() / df[col].notna().sum() * 100
         ax.barh(vc.index.astype(str), vc.values, color="#7b2d43")
         ax.set(xlabel="Reseñas",
-               title=f"{col} — top {n} de {df[col].nunique()} ({cobertura:.0f}% del total)")
+               title=f"{col}: top {n} de {df[col].nunique()} ({cobertura:.0f}% del total)")
         ax.tick_params(axis="y", labelsize=8)
 
     fig.tight_layout()
@@ -339,7 +439,7 @@ def grafico_puntaje_por_pais(df, n=12, minimo=500):
     ax.set_xticks(range(1, len(orden) + 1))
     ax.set_xticklabels([f"{c}\n(n={conteos[c]:,})" for c in orden], fontsize=8)
     ax.set(ylabel="Puntaje",
-           title=f"Puntajes por país — top {n} por mediana (mínimo {minimo} reseñas)")
+           title=f"Puntajes por país, top {n} por mediana (mínimo {minimo} reseñas)")
     ax.grid(axis="y", alpha=0.3)
     return _guardar(fig, "05_puntaje_por_pais")
 
@@ -376,7 +476,7 @@ def diagnostico_faltantes(df):
     - MNAR: la ausencia depende del propio valor faltante. No es corregible
       sólo con los datos disponibles.
 
-    En este dataset `price` resulta claramente MAR: Francia tiene 20% de
+    En este dataset `price` es claramente MAR: Francia tiene 20% de
     precios ausentes contra 0,4% de Estados Unidos, y la tasa crece con el
     puntaje. Por eso se imputa condicionando por país, variedad y puntaje en
     lugar de usar la mediana general.
@@ -397,8 +497,8 @@ def validar_imputacion_precio(df, semilla=42):
     precios observados, se imputa con cada candidato y se mide el error contra
     el valor real, que en esas filas sí se conoce.
 
-    El ocultamiento replica el patrón MAR real —se oculta más en los países que
-    de verdad tienen más faltantes— en vez de sortear filas al azar. Evaluar
+    El ocultamiento replica el patrón MAR real, ocultando más en los países que
+    de verdad tienen más faltantes, en vez de sortear filas al azar. Evaluar
     contra un patrón MCAR artificial sobrestimaría a los métodos globales, que
     son justamente los que fallan cuando la ausencia está concentrada.
     """
@@ -619,8 +719,8 @@ def atipicos_contextuales(df, umbral=UMBRAL_RATIO_PARES):
     igual de extremo y es un error de carga.
 
     La diferencia sólo aparece en contexto. Se compara cada precio con la
-    mediana de su grupo de pares —misma provincia y mismo puntaje— y se
-    reporta el cociente. Un vino caro entre vinos caros da un ratio cercano a
+    mediana de su grupo de pares, o sea los vinos de la misma provincia y el
+    mismo puntaje, y se reporta el cociente. Un vino caro entre vinos caros da un ratio cercano a
     1; un vino caro entre vinos baratos se delata.
 
     Devuelve los casos por encima del umbral, ordenados por ratio, para
@@ -772,8 +872,8 @@ def extraer_anio(df):
     temporal.
 
     La solución aprovecha que el nombre de la bodega ya está en su propia
-    columna y que el título siempre empieza con él —verificado sobre el 100% de
-    las filas—: se recorta ese prefijo y recién entonces se busca el año.
+    columna y que el título siempre empieza con él, cosa verificada sobre el
+    100% de las filas: se recorta ese prefijo y recién entonces se busca el año.
 
     Las filas sin año son vinos espumantes rotulados "NV" (non-vintage), que
     son mezclas de varias cosechas y legítimamente no tienen uno. Quedan como
@@ -791,6 +891,45 @@ def extraer_anio(df):
     anio = anio.where(anio.between(ANIO_MINIMO, ANIO_MAXIMO))
 
     return df.assign(anio=anio.astype("Int64"))
+
+
+def agregar_longitud(df):
+    """Agrega la cantidad de palabras de cada nota de cata.
+
+    `description` es texto libre y no admite las frecuencias que se usan con las
+    demás variables, pero sí una medida simple: cuánto escribió el catador. Es
+    la única variable que se puede derivar de esa columna sin entrar en
+    procesamiento de lenguaje natural.
+
+    Interesa porque la extensión de una reseña no la decide el vino sino quien
+    la escribe, así que sirve para preguntar si los catadores se explayan más
+    con los vinos que puntúan alto.
+    """
+    return df.assign(palabras=df["description"].str.split().str.len())
+
+
+def analisis_longitud(df):
+    """Relación entre el largo de la reseña, el puntaje y el precio.
+
+    Devuelve las correlaciones y el promedio de palabras por tramo de puntaje.
+    Se usa Spearman además de Pearson porque el precio sigue siendo asimétrico,
+    y se trabaja sólo con precios observados para no medir contra valores
+    imputados.
+    """
+    datos = df[~df["price_imputado"]].dropna(subset=["palabras"])
+
+    correlaciones = pd.DataFrame({
+        "Pearson": [stats.pearsonr(datos["palabras"], datos["points"])[0],
+                    stats.pearsonr(datos["palabras"], np.log(datos["price"]))[0]],
+        "Spearman": [stats.spearmanr(datos["palabras"], datos["points"])[0],
+                     stats.spearmanr(datos["palabras"], datos["price"])[0]],
+    }, index=["palabras vs puntaje", "palabras vs precio"]).round(3)
+
+    por_puntaje = (datos.groupby("points")["palabras"]
+                   .agg(reseñas="size", palabras_medias="mean")
+                   .round(1))
+
+    return correlaciones, por_puntaje
 
 
 def analisis_temporal(df, minimo=500):
@@ -829,11 +968,11 @@ def efecto_catador(df, minimo=1500):
     correcta: frente al mismo tipo de vino, ¿este catador puntúa por encima o
     por debajo de lo habitual?
 
-    El resultado es que la brecha de 3,77 puntos cae a 0,78, y el catador que
-    parecía el más severo puntúa en el promedio exacto (-0,02). Casi toda la
-    diferencia aparente era asignación, no criterio: es un caso de confusión
-    por una variable omitida, y comparar las medias crudas habría llevado a una
-    conclusión equivocada sobre personas concretas.
+    La brecha de 3,77 puntos cae a 0,78, y el catador que parecía el más severo
+    puntúa en el promedio exacto (-0,02). Casi toda la diferencia venía de qué
+    vinos le tocaban, no de su criterio. Es confusión por una variable omitida,
+    y comparar las medias crudas habría llevado a una conclusión equivocada
+    sobre el trabajo de personas con nombre y apellido.
     """
     conocidos = df[df["taster_name"] != ETIQUETAS_FALTANTES["taster_name"]]
     grupo = conocidos.groupby(["country", "variety"], observed=True)["points"]
@@ -939,6 +1078,9 @@ if __name__ == "__main__":
     print("\n--- Depuración ---")
     vinos = quitar_duplicados(vinos)
 
+    print("\n--- Resumen estadístico de las variables categóricas ---")
+    print(resumen_categoricas(vinos).to_string())
+
     # Estos gráficos se generan ANTES del tratamiento de faltantes: el mapa de
     # nulos necesita ver los nulos, y los demás describen los datos tal como
     # llegaron, sin valores imputados mezclados.
@@ -991,6 +1133,13 @@ if __name__ == "__main__":
 
     print("\n--- Comparativo: variedades con mejor puntaje por dólar ---")
     print(mejor_relacion_calidad_precio(vinos).to_string())
+
+    print("\n--- Comparativo: largo de la reseña ---")
+    vinos = agregar_longitud(vinos)
+    correlaciones, palabras_por_puntaje = analisis_longitud(vinos)
+    print(correlaciones.to_string())
+    print(f"\nDe {palabras_por_puntaje.loc[80, 'palabras_medias']:.0f} palabras en 80 puntos "
+          f"a {palabras_por_puntaje.loc[100, 'palabras_medias']:.0f} en 100.")
 
     grafico_comparativo(vinos)
     plt.close("all")
