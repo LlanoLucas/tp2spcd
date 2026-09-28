@@ -1,11 +1,10 @@
 """
-Análisis exploratorio de datos de reseñas de vinos (WineEnthusiast)
-Trabajo Práctico 2, Seminario de Programación para Ciencia de Datos
+TP2 - Seminario de Programación para Ciencia de Datos
+Análisis exploratorio de las reseñas de vinos de WineEnthusiast.
+Lucas Llano
 
-Autor: Lucas Llano
-
-Requisitos: pandas, numpy, matplotlib, seaborn, scipy
-Uso:        python analisis_exploratorio_vinos.py
+Necesita pandas, numpy, matplotlib y scipy.
+Para correrlo: python analisis_exploratorio_vinos.py
 """
 
 import csv
@@ -18,262 +17,118 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-# ---------------------------------------------------------------------------
-# CONFIGURACIÓN
-# ---------------------------------------------------------------------------
-
-# El script acepta las dos formas en que puede llegar el dataset y elige el
-# camino según la extensión:
-#
-#   .csv   el archivo original, que se lee directo.
-#   .xlsx  el archivo que vino con el enunciado, que no es una hoja de cálculo
-#          sino ese mismo CSV dañado por una importación mal configurada en
-#          Excel. La sección 1 documenta y revierte ese daño.
-#
-# Se buscan en orden: el primero que exista es el que se usa.
+# Uso el primer archivo que encuentre. El .xlsx es el que vino con el enunciado:
+# es el mismo CSV, pero se rompió al abrirlo en Excel (ver sección 1).
 RUTAS_POSIBLES = [
     "winemag-data-130k-v2.csv",
     "Entregable 2 - Documentación extra.xlsx",
 ]
 
-# Campos que debe tener cada línea del CSV: 13 columnas de datos más la columna
-# de índice sin nombre que quedó al exportar. Es la condición que verifica si la
-# reconstrucción del archivo dañado salió bien.
-CAMPOS_POR_LINEA = 14
+DIR_GRAFICOS = Path("graficos")
 
 
 # ===========================================================================
 # 1. CARGA DE DATOS
 # ===========================================================================
 
-def _reconstruir_lineas(ruta):
-    """Deshace el daño de la importación a Excel y devuelve el CSV como texto.
+def reconstruir_csv(ruta):
+    """Arma de nuevo el CSV original a partir del .xlsx que vino roto.
 
-    El archivo entregado tiene tres problemas, todos originados en el mismo
-    hecho: el CSV se abrió en Excel con una configuración regional que usa el
-    punto y coma como separador de campos.
-
-    Problema 1. Delimitador equivocado.
-        Excel recorrió cada línea buscando ';' y cortó ahí, repartiendo el
-        contenido en varias celdas y descartando el separador. Como el CSV real
-        está delimitado por comas, el 96% de las líneas no contenía ningún ';'
-        y quedó entera en la columna A; las 2.956 restantes (las que tenían un
-        punto y coma dentro de alguna descripción) quedaron partidas.
-        Se revierte volviendo a unir las celdas no vacías con ';'.
-
-    Problema 2. Reseñas repartidas en varias filas.
-        Cuatro descripciones contenían saltos de línea reales, y al importarlas
-        quedaron distribuidas en más de una fila de la hoja. Se detectan porque
-        toda línea de datos sana empieza con el índice numérico seguido de coma
-        ("48,US,..."); una línea que no cumple ese patrón es la continuación de
-        la anterior.
-
-    No se corrige acá el problema 3 (codificación), que se trata por separado
-    en `_reparar_codificacion` porque opera sobre valores ya parseados.
+    Excel cortó las líneas en cada ';' (que en realidad era parte del texto de
+    algunas reseñas) y partió en varias filas las reseñas con saltos de línea.
     """
     crudo = pd.read_excel(ruta)
 
-    # read_excel tomó la primera línea del CSV como encabezado y la convirtió en
-    # el nombre de la columna 0. Hay que devolverla al cuerpo del texto, o se
-    # pierden los nombres de las columnas y una reseña.
+    # read_excel tomó la primera línea como encabezado, así que la vuelvo a poner.
     lineas = [crudo.columns[0]]
-
-    # Reponer el ';' que Excel consumió. El filtro por isinstance descarta los
-    # NaN de las celdas vacías, que no son texto y romperían el join.
     for fila in crudo.itertuples(index=False):
+        # junto con ';' las celdas que Excel separó (las vacías vienen como NaN)
         lineas.append(";".join(c for c in fila if isinstance(c, str)))
 
-    # Volver a pegar las reseñas que quedaron partidas en varias filas.
+    # Las líneas bien formadas empiezan con el índice y una coma ("48,US,...").
+    # Si una no empieza así, es un pedazo de la reseña anterior.
     unidas = [lineas[0]]
     for linea in lineas[1:]:
         if re.match(r"^\d+,", linea):
             unidas.append(linea)
         else:
             unidas[-1] += "\n" + linea
-
     texto = "\n".join(unidas)
 
-    # El criterio de éxito se fija antes de cargar, no después: si la
-    # reconstrucción es correcta, toda línea da CAMPOS_POR_LINEA campos al
-    # analizarse como CSV. Se usa csv.reader y no split(",") porque las
-    # descripciones tienen comas dentro de comillas.
+    # Chequeo: todas las líneas tienen que tener 14 campos (índice + 13 columnas).
     anchos = {len(campos) for campos in csv.reader(io.StringIO(texto))}
-    assert anchos == {CAMPOS_POR_LINEA}, (
-        f"la reconstrucción falló: se esperaban {CAMPOS_POR_LINEA} campos por "
-        f"línea y se encontraron anchos {sorted(anchos)}")
-
+    assert anchos == {14}, f"la reconstrucción falló, anchos: {sorted(anchos)}"
     return texto
 
 
-def _reparar_codificacion(texto):
-    """Revierte el mojibake producido por leer UTF-8 como cp1252.
+def arreglar_codificacion(texto):
+    """Arregla los acentos rotos: 'GewÃ¼rztraminer' pasa a 'Gewürztraminer'.
 
-    Síntoma: 'Gewürztraminer' aparece como 'GewÃ¼rztraminer' y 'Albariño' como
-    'AlbariÃ±o'. Ocurre cuando bytes UTF-8 se interpretan byte a byte con la
-    codificación de Windows Europa Occidental.
-
-    La vuelta atrás es exacta: se codifica el texto en cp1252 para recuperar los
-    bytes originales y se decodifica como UTF-8, que es lo que siempre fueron.
-    Si cualquiera de los dos pasos falla, el valor vuelve sin tocar en lugar de
-    corromperse más. Quedan así 132 celdas sin reparar sobre 106.611 afectadas:
-    son comillas tipográficas cuya secuencia de bytes usa posiciones que cp1252
-    no define.
+    Esto pasa cuando un texto en UTF-8 se lee como si fuera cp1252.
     """
     if not isinstance(texto, str):
         return texto
-
-    # Tres celdas pasaron dos veces por la conversión equivocada y quedaron con
-    # mojibake sobre mojibake: "crème" aparece como "crÃƒÂ¨me", y una sola
-    # vuelta la deja en "crÃ¨me", todavía rota. Se repite hasta que el texto
-    # deje de cambiar.
-    #
-    # El ciclo siempre termina: cada vuelta que tiene efecto acorta el texto,
-    # porque el mojibake usa más caracteres que el original. Y no puede pasarse
-    # de largo sobre texto ya correcto: "Gewürztraminer" da los bytes de cp1252
-    # 'Gew\xfcrztraminer', que no son UTF-8 válido, así que falla y se devuelve
-    # intacto. El tope es una red de seguridad, no parte de la lógica.
+    # Lo repito porque algunas celdas se rompieron dos veces. Si el texto ya
+    # estaba bien, el decode falla y lo devuelvo como estaba.
     for _ in range(5):
         try:
-            candidato = texto.encode("cp1252").decode("utf-8")
+            nuevo = texto.encode("cp1252").decode("utf-8")
         except (UnicodeEncodeError, UnicodeDecodeError):
             return texto
-        if candidato == texto:
+        if nuevo == texto:
             return texto
-        texto = candidato
-
+        texto = nuevo
     return texto
 
 
-def _elegir_ruta():
-    """Devuelve el primer archivo de datos que exista entre los aceptados."""
-    for candidata in RUTAS_POSIBLES:
-        if Path(candidata).exists():
-            return candidata
-    raise FileNotFoundError(
-        "No se encontró el archivo de datos. Se buscaron, en este orden: "
-        + ", ".join(RUTAS_POSIBLES))
+def buscar_archivo():
+    """Devuelve el primer archivo de datos que encuentre en la carpeta."""
+    for ruta in RUTAS_POSIBLES:
+        if Path(ruta).exists():
+            return ruta
+    raise FileNotFoundError("No encontré ninguno de: " + ", ".join(RUTAS_POSIBLES))
 
 
 def cargar_datos(ruta=None):
-    """Carga el dataset de reseñas y devuelve un DataFrame verificado.
+    """Carga el dataset (el CSV o el .xlsx roto) y revisa que haya quedado bien."""
+    ruta = ruta or buscar_archivo()
 
-    Acepta tanto el CSV original como el .xlsx dañado que vino con el enunciado,
-    y elige qué hacer según la extensión. El CSV se lee directo; el .xlsx pasa
-    antes por la reconstrucción de `_reconstruir_lineas`.
-
-    Los dos caminos terminan en el mismo lugar: la reparación de codificación se
-    aplica igual, porque es inocua sobre texto que ya está bien, y las mismas
-    aserciones verifican el resultado venga de donde venga.
-    """
-    ruta = ruta or _elegir_ruta()
-
-    # index_col=0 adopta la columna de índice heredada del CSV como índice del
-    # DataFrame, en vez de arrastrarla como una columna de datos redundante.
+    # index_col=0 porque la primera columna es un índice que quedó del CSV
     if str(ruta).lower().endswith(".csv"):
         df = pd.read_csv(ruta, index_col=0)
     else:
-        df = pd.read_csv(io.StringIO(_reconstruir_lineas(ruta)), index_col=0)
+        df = pd.read_csv(io.StringIO(reconstruir_csv(ruta)), index_col=0)
 
-    for columna in df.select_dtypes(exclude="number").columns:
-        df[columna] = df[columna].map(_reparar_codificacion)
+    for col in df.select_dtypes(exclude="number").columns:
+        df[col] = df[col].map(arreglar_codificacion)
 
-    # Verificación explícita de la carga. Que read_csv no lance una excepción
-    # sólo prueba que el texto era parseable, no que se haya cargado bien; estas
-    # condiciones sí fallan si el archivo de origen cambia o la reconstrucción
-    # se rompe.
+    # Que no tire error no quiere decir que esté bien, así que reviso forma y tipos
     assert df.shape == (129971, 13), f"shape inesperado: {df.shape}"
     assert df["points"].dtype.kind == "i", "points debería ser entero"
     assert df["price"].dtype.kind == "f", "price debería ser float"
-    assert df.index.is_unique, "el índice tiene valores repetidos"
-
     return df
 
 
 # ===========================================================================
-# 2. PERFILADO Y DEPURACIÓN INICIAL
+# 2. ESTRUCTURA Y RESUMEN ESTADÍSTICO
 # ===========================================================================
 
 def perfil_columnas(df):
-    """Resumen por columna: tipo, faltantes y cardinalidad.
-
-    Reemplaza a `info()` porque agrega dos cosas que hacen falta para decidir
-    el tratamiento de cada variable: el porcentaje de nulos (comparable entre
-    columnas) y la cardinalidad relativa, que distingue una categórica de un
-    identificador. Una columna con cardinalidad cercana al 100% (`description`,
-    `title`) es texto libre o clave única y no admite análisis de frecuencias.
-    """
+    """Para cada columna: tipo, cantidad de nulos y cuántos valores distintos tiene."""
     return pd.DataFrame({
         "tipo": df.dtypes.astype(str),
-        "no_nulos": df.notna().sum(),
         "nulos": df.isna().sum(),
         "nulos_%": (df.isna().mean() * 100).round(2),
         "unicos": df.nunique(),
-        "cardinalidad_%": (df.nunique() / len(df) * 100).round(2),
+        "unicos_%": (df.nunique() / len(df) * 100).round(2),
     }).sort_values("nulos_%", ascending=False)
 
 
-def resumen_categoricas(df, columnas=None):
-    """Resumen estadístico de las variables categóricas.
-
-    Las medidas de tendencia central y dispersión que sirven para una variable
-    numérica no tienen sentido acá: no hay promedio de países ni desvío de
-    variedades. El equivalente para una categórica son la moda, su peso
-    relativo y alguna medida de cuán repartida está la masa entre categorías.
-
-    La entropía normalizada cumple ese papel. Vale 0 cuando todas las reseñas
-    caen en una sola categoría y 1 cuando se reparten en partes iguales, así que
-    compara concentración entre variables con distinta cantidad de categorías.
-    Es lo que distingue a `country`, donde unos pocos países se llevan casi
-    todo, de `winery`, donde 16.757 bodegas se reparten el conjunto de forma
-    pareja.
-
-    Se excluye el texto libre (`description`, `title`): con más del 90% de
-    valores únicos, su moda aparece dos o tres veces y no dice nada.
-    """
-    if columnas is None:
-        columnas = ["country", "province", "region_1", "region_2", "variety",
-                    "winery", "designation", "taster_name"]
-
-    filas = {}
-    for col in columnas:
-        valores = df[col].dropna()
-        frecuencias = valores.value_counts()
-        proporciones = frecuencias / len(valores)
-
-        # Entropía de Shannon dividida por su máximo posible, log(k).
-        entropia = -(proporciones * np.log(proporciones)).sum()
-        maxima = np.log(len(frecuencias)) if len(frecuencias) > 1 else 1
-
-        filas[col] = {
-            "categorías": len(frecuencias),
-            "moda": frecuencias.index[0],
-            "frec_moda": int(frecuencias.iloc[0]),
-            "moda_%": round(proporciones.iloc[0] * 100, 1),
-            "top10_%": round(frecuencias.head(10).sum() / len(valores) * 100, 1),
-            "entropía_norm": round(entropia / maxima, 3),
-        }
-
-    return pd.DataFrame(filas).T
-
-
 def quitar_duplicados(df):
-    """Elimina reseñas repetidas, conservando la primera aparición de cada una.
+    """Saca las filas repetidas (iguales en las 13 columnas).
 
-    El dataset trae 9.983 pares de filas idénticas en las 13 columnas: misma
-    descripción, mismo vino, mismo catador, mismo precio y mismo puntaje. Son
-    un artefacto de la extracción del sitio, no vinos distintos que casualmente
-    recibieron la misma reseña palabra por palabra.
-
-    Se eliminan antes de cualquier análisis, y no por prolijidad: una fila
-    contada dos veces duplica su peso en todo promedio, conteo, frecuencia y
-    correlación que se calcule después. Con el 7,7% de las filas repetidas, los
-    rankings por país y las medias por variedad quedarían sesgados hacia lo que
-    la extracción repitió.
-
-    Se comparan las 13 columnas y no sólo `description`, para no descartar dos
-    reseñas legítimamente distintas que compartan texto. En este dataset ambos
-    criterios coinciden (9.983 en los dos casos), lo que confirma que se trata
-    de filas enteramente repetidas.
+    Seguramente vienen de cómo se bajaron los datos del sitio. Si las dejo,
+    esas reseñas cuentan doble en todos los promedios.
     """
     antes = len(df)
     limpio = df.drop_duplicates()
@@ -282,113 +137,120 @@ def quitar_duplicados(df):
     return limpio
 
 
+def resumen_numericas(df):
+    """Resumen de points y price.
+
+    Además de lo que da describe() agrego el IQR, la asimetría y la curtosis
+    para ver qué forma tiene cada distribución.
+    """
+    num = df[["points", "price"]]
+    return pd.DataFrame({
+        "media": num.mean(),
+        "mediana": num.median(),
+        "desvio": num.std(),
+        "min": num.min(),
+        "max": num.max(),
+        "IQR": num.quantile(0.75) - num.quantile(0.25),
+        "asimetria": num.skew(),
+        "curtosis": num.kurt(),
+        "coef_variacion": num.std() / num.mean(),
+    }).T.round(2)
+
+
+def resumen_categoricas(df):
+    """Moda, cuánto pesa la moda y entropía de las variables categóricas.
+
+    La entropía normalizada va de 0 (todas las reseñas en una categoría) a 1
+    (repartidas en partes iguales). La uso para comparar qué tan concentrada
+    está cada variable. description y title no entran porque son texto libre.
+    """
+    columnas = ["country", "province", "region_1", "region_2", "variety",
+                "winery", "designation", "taster_name"]
+    filas = {}
+    for col in columnas:
+        frec = df[col].value_counts()
+        prop = frec / frec.sum()
+        entropia = -(prop * np.log(prop)).sum() / np.log(len(frec))
+        filas[col] = {
+            "categorías": len(frec),
+            "moda": frec.index[0],
+            "moda_%": round(prop.iloc[0] * 100, 1),
+            "top10_%": round(prop.head(10).sum() * 100, 1),
+            "entropía": round(entropia, 3),
+        }
+    return pd.DataFrame(filas).T
+
+
 # ===========================================================================
-# 3. VISUALIZACIÓN
+# 3. GRÁFICOS
 # ===========================================================================
 
-DIR_GRAFICOS = Path("graficos")
-
-
-def _guardar(fig, nombre):
-    """Guarda la figura en graficos/ y la devuelve para que el notebook la muestre."""
+def guardar_figura(fig, nombre):
+    """Guarda el gráfico como PNG en la carpeta graficos/."""
     DIR_GRAFICOS.mkdir(exist_ok=True)
     fig.savefig(DIR_GRAFICOS / f"{nombre}.png", dpi=150, bbox_inches="tight")
     return fig
 
 
 def grafico_puntajes(df):
-    """Distribución de `points`.
-
-    Se usa un bin por puntaje entero (la variable toma sólo 21 valores
-    distintos) para que cada barra represente un puntaje real y no un intervalo
-    arbitrario. La línea en 80 marca el punto de censura declarado en el
-    enunciado: WineEnthusiast no publica reseñas por debajo de ese valor, así
-    que la distribución observada es la de los vinos publicados, no la de los
-    vinos evaluados.
-    """
+    """Histograma de points, con una barra por cada puntaje."""
     fig, ax = plt.subplots(figsize=(9, 4.5))
     bins = range(df["points"].min(), df["points"].max() + 2)
     ax.hist(df["points"], bins=bins, color="#7b2d43", edgecolor="white", align="left")
 
-    # Espacio libre arriba para que las anotaciones no se superpongan a las barras.
-    ax.set_ylim(top=ax.get_ylim()[1] * 1.25)
+    ax.set_ylim(top=ax.get_ylim()[1] * 1.25)  # dejo lugar arriba para los textos
     alto = ax.get_ylim()[1]
-
+    media = df["points"].mean()
     ax.axvline(80, color="#c8102e", ls="--", lw=1.5)
-    ax.text(80.4, alto * 0.94, "censura: no se publican reseñas < 80",
+    ax.text(80.4, alto * 0.94, "no se publican reseñas < 80",
             color="#c8102e", fontsize=9, va="top")
-    ax.axvline(df["points"].mean(), color="black", ls=":", lw=1.5)
-    ax.text(df["points"].mean() + 0.3, alto * 0.84,
-            f"media {df['points'].mean():.1f}", fontsize=9, va="top")
+    ax.axvline(media, color="black", ls=":", lw=1.5)
+    ax.text(media + 0.3, alto * 0.84, f"media {media:.1f}", fontsize=9, va="top")
     ax.set(xlabel="Puntaje", ylabel="Cantidad de reseñas",
-           title="Distribución de puntajes (simétrica, pero censurada en 80)")
-    return _guardar(fig, "01_distribucion_puntajes")
+           title="Distribución de puntajes")
+    return guardar_figura(fig, "01_distribucion_puntajes")
 
 
 def grafico_precios(df):
-    """Distribución de `price` en escala lineal y logarítmica.
-
-    Las dos escalas van juntas a propósito: el panel izquierdo muestra por qué
-    la escala lineal es inservible acá (la asimetría de 18 comprime el 99% de
-    los datos contra el eje y deja el gráfico vacío), y el derecho muestra que
-    en escala logarítmica la misma variable es aproximadamente simétrica. Esa
-    comparación justifica usar log en el resto del análisis: no es un truco
-    estético, es que `price` se comporta como una variable log-normal.
-    """
+    """Histograma del precio en escala normal y en escala logarítmica."""
     precio = df["price"].dropna()
     fig, (izq, der) = plt.subplots(1, 2, figsize=(13, 4.5))
 
     izq.hist(precio, bins=100, color="#7b2d43", edgecolor="white")
     izq.set(xlabel="Precio (USD)", ylabel="Cantidad de reseñas",
-            title=f"Escala lineal: asimetría {precio.skew():.1f}")
+            title=f"Escala lineal (asimetría {precio.skew():.1f})")
 
-    der.hist(precio, bins=np.logspace(np.log10(precio.min()), np.log10(precio.max()), 60),
-             color="#3d5a6c", edgecolor="white")
+    bins_log = np.logspace(np.log10(precio.min()), np.log10(precio.max()), 60)
+    der.hist(precio, bins=bins_log, color="#3d5a6c", edgecolor="white")
     der.set_xscale("log")
     der.axvline(precio.median(), color="#c8102e", ls="--", lw=1.5)
     der.text(precio.median() * 1.1, der.get_ylim()[1] * 0.9,
              f"mediana ${precio.median():.0f}", color="#c8102e", fontsize=9)
-    der.set(xlabel="Precio (USD, escala log)", ylabel="",
-            title=f"Escala logarítmica: asimetría {np.log(precio).skew():.2f}")
+    der.set(xlabel="Precio (USD, escala log)",
+            title=f"Escala logarítmica (asimetría {np.log(precio).skew():.2f})")
 
-    fig.suptitle("La misma variable bajo dos escalas", y=1.02)
-    return _guardar(fig, "02_distribucion_precios")
+    fig.suptitle("Distribución de precios", y=1.02)
+    return guardar_figura(fig, "02_distribucion_precios")
 
 
 def grafico_categoricas(df, n=15):
-    """Top-N de las categóricas con mayor peso analítico.
-
-    Se grafican sólo las N categorías más frecuentes, ordenadas: con 707
-    variedades y 425 provincias, un gráfico completo sería ilegible y no
-    comunicaría nada. El subtítulo de cada panel informa qué porcentaje del
-    total cubre el top-N, para que el recorte quede explícito y el lector sepa
-    cuánto está viendo.
-    """
-    columnas = ["country", "variety", "province", "winery"]
+    """Las n categorías más comunes de country, variety, province y winery."""
     fig, ejes = plt.subplots(2, 2, figsize=(13, 9))
-
-    for ax, col in zip(ejes.flat, columnas):
+    for ax, col in zip(ejes.flat, ["country", "variety", "province", "winery"]):
         vc = df[col].value_counts().head(n).sort_values()
         cobertura = vc.sum() / df[col].notna().sum() * 100
         ax.barh(vc.index.astype(str), vc.values, color="#7b2d43")
         ax.set(xlabel="Reseñas",
                title=f"{col}: top {n} de {df[col].nunique()} ({cobertura:.0f}% del total)")
         ax.tick_params(axis="y", labelsize=8)
-
     fig.tight_layout()
-    return _guardar(fig, "03_categoricas_top")
+    return guardar_figura(fig, "03_categoricas_top")
 
 
 def grafico_precio_vs_puntaje(df):
-    """Relación entre precio y puntaje.
+    """Boxplot del precio para cada puntaje.
 
-    Un diagrama de dispersión con 120.000 puntos sería una mancha sólida, así
-    que se usa un boxplot por puntaje: `points` toma sólo 21 valores, lo que lo
-    vuelve un agrupador natural. El eje de precio va en escala logarítmica por
-    lo visto en `grafico_precios`.
-
-    La línea une las medianas para hacer visible la tendencia central sin que
-    la arrastren los precios extremos.
+    Uso boxplot porque un scatter con 120 mil puntos queda como una mancha.
     """
     datos = df.dropna(subset=["price"])
     puntajes = sorted(datos["points"].unique())
@@ -402,32 +264,22 @@ def grafico_precio_vs_puntaje(df):
             label="mediana por puntaje")
     ax.set_yscale("log")
     ax.set(xlabel="Puntaje", ylabel="Precio (USD, escala log)",
-           title="El precio crece de forma aproximadamente exponencial con el puntaje")
+           title="Precio según puntaje")
     ax.legend()
-    return _guardar(fig, "04_precio_vs_puntaje")
+    return guardar_figura(fig, "04_precio_vs_puntaje")
 
 
 def grafico_puntaje_por_pais(df, n=12, minimo=500):
-    """Distribución de puntajes en los principales países productores.
+    """Boxplot de puntajes de los países con mejor mediana.
 
-    Se exige un mínimo de reseñas por país para que la comparación sea honesta:
-    la mediana de un país con 20 reseñas no es comparable con la de uno que
-    tiene 50.000, y ordenar sin ese filtro pondría países marginales arriba del
-    ranking por puro ruido muestral. Los países se ordenan por mediana, no
-    alfabéticamente, para que el gráfico se lea como un ranking.
-
-    Se usa boxplot y no violín: el violín estima la densidad por kernel, un
-    método que asume variable continua. Como `points` toma sólo 21 valores
-    enteros, el suavizado produce ondulaciones que son artefactos del método y
-    no estructura de los datos. El boxplot trabaja sobre cuantiles y no inventa
-    forma donde no la hay.
+    Solo tomo países con al menos 500 reseñas, porque con pocas la mediana no
+    es confiable.
     """
     conteos = df["country"].value_counts()
     candidatos = conteos[conteos >= minimo].index
     orden = (df[df["country"].isin(candidatos)]
-             .groupby("country", observed=True)["points"].median()
+             .groupby("country")["points"].median()
              .sort_values(ascending=False).head(n).index)
-
     grupos = [df.loc[df["country"] == c, "points"].values for c in orden]
 
     fig, ax = plt.subplots(figsize=(11, 5))
@@ -438,177 +290,14 @@ def grafico_puntaje_por_pais(df, n=12, minimo=500):
         caja.set_alpha(0.75)
     ax.set_xticks(range(1, len(orden) + 1))
     ax.set_xticklabels([f"{c}\n(n={conteos[c]:,})" for c in orden], fontsize=8)
-    ax.set(ylabel="Puntaje",
-           title=f"Puntajes por país, top {n} por mediana (mínimo {minimo} reseñas)")
+    ax.set(ylabel="Puntaje", title=f"Puntajes por país (mínimo {minimo} reseñas)")
     ax.grid(axis="y", alpha=0.3)
-    return _guardar(fig, "05_puntaje_por_pais")
-
-
-# ===========================================================================
-# 4. TRATAMIENTO DE DATOS FALTANTES
-# ===========================================================================
-
-# Etiquetas para los faltantes estructurales. La clave de esta sección es que
-# la mayoría de los nulos de este dataset NO son datos perdidos: son campos que
-# no aplican al vino en cuestión. Reemplazarlos por una etiqueta explícita
-# conserva esa información; imputarlos inventaría un dato que nunca existió.
-ETIQUETAS_FALTANTES = {
-    "region_2": "No aplica",        # sub-apelación exclusiva del sistema de EE.UU.
-    "region_1": "Sin región",
-    "designation": "Sin designación",
-    "taster_name": "No informado",
-    "taster_twitter_handle": "No informado",
-    "country": "Desconocido",
-    "province": "Desconocido",
-    "variety": "Desconocida",
-}
-
-
-def diagnostico_faltantes(df):
-    """Mide si la ausencia de `price` depende de otras variables observadas.
-
-    Distinguir el mecanismo es lo que decide el tratamiento:
-
-    - MCAR (falta completamente al azar): la ausencia no se relaciona con nada.
-      Cualquier imputación razonable sirve y eliminar filas no sesga.
-    - MAR (falta al azar condicionado): la ausencia depende de variables que sí
-      se observan. Imputar con un valor global sesga; hay que condicionar.
-    - MNAR: la ausencia depende del propio valor faltante. No es corregible
-      sólo con los datos disponibles.
-
-    En este dataset `price` es claramente MAR: Francia tiene 20% de
-    precios ausentes contra 0,4% de Estados Unidos, y la tasa crece con el
-    puntaje. Por eso se imputa condicionando por país, variedad y puntaje en
-    lugar de usar la mediana general.
-    """
-    falta = df["price"].isna()
-    por_pais = (df.assign(_f=falta).groupby("country", observed=True)["_f"]
-                  .agg(reseñas="size", sin_precio_pct=lambda s: round(s.mean() * 100, 1)))
-    por_pais = por_pais[por_pais["reseñas"] >= 1000].sort_values("sin_precio_pct",
-                                                                ascending=False)
-    por_puntaje = (df.assign(_f=falta).groupby("points")["_f"].mean() * 100).round(1)
-    return por_pais, por_puntaje
-
-
-def validar_imputacion_precio(df, semilla=42):
-    """Compara estrategias de imputación ocultando precios que sí se conocen.
-
-    Es la única forma honesta de elegir un método: se esconde una muestra de
-    precios observados, se imputa con cada candidato y se mide el error contra
-    el valor real, que en esas filas sí se conoce.
-
-    El ocultamiento replica el patrón MAR real, ocultando más en los países que
-    de verdad tienen más faltantes, en vez de sortear filas al azar. Evaluar
-    contra un patrón MCAR artificial sobrestimaría a los métodos globales, que
-    son justamente los que fallan cuando la ausencia está concentrada.
-    """
-    rng = np.random.default_rng(semilla)
-    tasa = df.assign(_f=df["price"].isna()).groupby("country", observed=True)["_f"].mean()
-
-    ocultar = []
-    for pais, grupo in df[df["price"].notna()].groupby("country", observed=True):
-        cuantos = int(len(grupo) * tasa.get(pais, 0.07))
-        if cuantos:
-            ocultar += list(rng.choice(grupo.index, size=cuantos, replace=False))
-    ocultar = pd.Index(ocultar)
-
-    real = df.loc[ocultar, "price"]
-    prueba = df.copy()
-    prueba.loc[ocultar, "price"] = np.nan
-
-    def mediana_por(*columnas):
-        return prueba.groupby(list(columnas), observed=True)["price"].transform("median")
-
-    candidatos = {
-        "media global": prueba["price"].fillna(prueba["price"].mean()),
-        "mediana global": prueba["price"].fillna(prueba["price"].median()),
-        "mediana por país": prueba["price"].fillna(mediana_por("country")),
-        "mediana por variedad": prueba["price"].fillna(mediana_por("variety")),
-        "mediana por país+variedad": prueba["price"].fillna(mediana_por("country", "variety")),
-        "mediana por país+variedad+puntaje": prueba["price"].fillna(
-            mediana_por("country", "variety", "points")),
-    }
-
-    filas = {}
-    for nombre, estimado in candidatos.items():
-        estimado = estimado.fillna(prueba["price"].median())
-        error = estimado.loc[ocultar] - real
-        filas[nombre] = {
-            "MAE": error.abs().mean(),
-            "error_mediano": error.abs().median(),
-            "MAPE_%": (error.abs() / real * 100).median(),
-            "sesgo": error.mean(),
-        }
-    return pd.DataFrame(filas).T.round(2)
-
-
-def imputar_precio(df):
-    """Imputa `price` con la mediana condicional por país, variedad y puntaje.
-
-    Estrategia elegida por la validación de `validar_imputacion_precio`: baja el
-    error absoluto medio de $21,96 (mediana global) a $14,88, y el error
-    porcentual mediano del 47% al 25%. Incorporar `points` al agrupador es lo
-    que más aporta, algo consistente con la relación exponencial entre precio y
-    puntaje que muestra el gráfico 04.
-
-    Se usan medianas y no medias porque `price` tiene asimetría 18: la media de
-    cualquier grupo está inflada por unas pocas botellas muy caras.
-
-    La cascada de respaldos cubre los grupos sin datos suficientes, de lo más
-    específico a lo más general, y garantiza que no queden nulos.
-
-    Se agrega la columna `price_imputado` para poder excluir estos valores de
-    cualquier análisis donde comprometan la conclusión. Importa especialmente
-    porque la imputación usa `points`: estudiar la relación precio-puntaje
-    sobre valores imputados así reforzaría artificialmente esa misma relación.
-    Es un caso de circularidad, y la bandera permite evitarlo.
-    """
-    df = df.copy()
-    df["price_imputado"] = df["price"].isna()
-
-    def mediana_por(*columnas):
-        return df.groupby(list(columnas), observed=True)["price"].transform("median")
-
-    df["price"] = (df["price"]
-                   .fillna(mediana_por("country", "variety", "points"))
-                   .fillna(mediana_por("country", "variety"))
-                   .fillna(mediana_por("variety"))
-                   .fillna(mediana_por("country"))
-                   .fillna(df["price"].median()))
-
-    assert df["price"].notna().all(), "quedaron precios sin imputar"
-    return df
-
-
-def tratar_faltantes(df):
-    """Aplica el tratamiento de faltantes decidido para cada columna.
-
-    El orden importa: primero se etiquetan las categóricas, para que las filas
-    sin país o sin variedad formen su propio grupo en lugar de desaparecer de
-    los agrupamientos que después usa la imputación de precio.
-
-    No se elimina ninguna fila. Las 63 sin país y la única sin variedad tienen
-    puntaje, precio y descripción válidos: descartarlas perdería esa
-    información a cambio de nada, mientras que etiquetarlas deja la ignorancia
-    declarada y visible en cualquier tabla de frecuencias.
-    """
-    df = df.copy()
-    for columna, etiqueta in ETIQUETAS_FALTANTES.items():
-        df[columna] = df[columna].fillna(etiqueta)
-    return imputar_precio(df)
+    return guardar_figura(fig, "05_puntaje_por_pais")
 
 
 def grafico_faltantes(df):
-    """Mapa de faltantes por columna y de su co-ocurrencia.
-
-    El panel izquierdo ordena las columnas por porcentaje de nulos. El derecho
-    muestra, para cada par de columnas, qué proporción de las filas a las que
-    les falta una también tiene ausente la otra: es lo que distingue un
-    faltante estructural de uno aleatorio. El 1,00 entre `taster_name` y
-    `taster_twitter_handle` prueba que la segunda es función de la primera.
-    """
-    con_nulos = df.columns[df.isna().any()]
-    nulos = df[con_nulos].isna()
+    """Porcentaje de nulos por columna, y qué columnas suelen faltar juntas."""
+    nulos = df[df.columns[df.isna().any()]].isna()
     orden = nulos.mean().sort_values(ascending=False).index
     nulos = nulos[orden]
 
@@ -625,8 +314,8 @@ def grafico_faltantes(df):
     izq.set(xlabel="% de valores faltantes", title="Faltantes por columna",
             xlim=(0, pct.max() * 1.25))
 
-    # P(falta B | falta A): condicional, no simétrica, y por eso más informativa
-    # que una correlación para detectar dependencias estructurales.
+    # Se lee por fila: cuando falta la variable de la fila, qué proporción de
+    # las veces falta también la de la columna.
     cond = pd.DataFrame(
         {b: [nulos[b][nulos[a]].mean() for a in orden] for b in orden}, index=orden)
     im = der.imshow(cond.values, cmap="RdPu", vmin=0, vmax=1)
@@ -639,54 +328,142 @@ def grafico_faltantes(df):
             v = cond.values[i, j]
             der.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=7,
                      color="white" if v > 0.6 else "black")
-    # Se lee por fila: "de las filas a las que les falta <fila>, esta proporción
-    # tiene también ausente <columna>". No es simétrica, y ahí está su valor.
     der.set_title("P(falta la columna | falta la fila)")
     fig.colorbar(im, ax=der, shrink=0.8)
 
     fig.tight_layout()
-    return _guardar(fig, "06_faltantes")
+    return guardar_figura(fig, "06_faltantes")
 
 
 # ===========================================================================
-# 5. ANÁLISIS DE DATOS ATÍPICOS
+# 4. DATOS FALTANTES
 # ===========================================================================
 
-# Un precio se considera sospechoso cuando supera en este factor a la mediana
-# de su grupo de pares. El umbral sale de la distribución observada de ratios:
-# el percentil 99,9 está en 7,3x, así que 10x deja fuera del alcance a la
-# variación legítima de mercado y sólo alcanza a casos que exigen explicación.
-UMBRAL_RATIO_PARES = 10
+# En las categóricas el nulo casi siempre quiere decir "no aplica" (por ejemplo,
+# region_2 solo existe para vinos de EE.UU.). Por eso no invento un valor, le
+# pongo una etiqueta.
+ETIQUETAS_FALTANTES = {
+    "region_2": "No aplica",
+    "region_1": "Sin región",
+    "designation": "Sin designación",
+    "taster_name": "No informado",
+    "taster_twitter_handle": "No informado",
+    "country": "Desconocido",
+    "province": "Desconocido",
+    "variety": "Desconocida",
+}
 
-# Mínimo de vinos que debe tener un grupo de pares para que su mediana sirva
-# como referencia. Con menos, la mediana es demasiado inestable.
-MINIMO_GRUPO_PARES = 30
+
+def diagnostico_faltantes(df):
+    """Porcentaje de precios faltantes por país y por puntaje.
+
+    Sirve para ver si el precio falta al azar o no. Si depende de otras
+    variables (MAR), imputar con la mediana general da mal y conviene hacerlo
+    por grupos.
+    """
+    falta = df["price"].isna()
+    por_pais = (df.assign(falta=falta).groupby("country")["falta"]
+                  .agg(reseñas="size", sin_precio_pct=lambda s: round(s.mean() * 100, 1)))
+    por_pais = por_pais[por_pais["reseñas"] >= 1000].sort_values(
+        "sin_precio_pct", ascending=False)
+    por_puntaje = (df.assign(falta=falta).groupby("points")["falta"].mean() * 100).round(1)
+    return por_pais, por_puntaje
+
+
+def validar_imputacion_precio(df, semilla=42):
+    """Prueba varios métodos de imputación con precios que sí conozco.
+
+    Escondo algunos precios (más en los países donde de verdad faltan más, para
+    que se parezca al caso real), los imputo con cada método y comparo con el
+    valor verdadero.
+    """
+    rng = np.random.default_rng(semilla)
+    tasa = df["price"].isna().groupby(df["country"]).mean()
+
+    ocultar = []
+    for pais, grupo in df[df["price"].notna()].groupby("country"):
+        cuantos = int(len(grupo) * tasa.get(pais, 0.07))
+        if cuantos:
+            ocultar += list(rng.choice(grupo.index, size=cuantos, replace=False))
+
+    real = df.loc[ocultar, "price"]
+    prueba = df.copy()
+    prueba.loc[ocultar, "price"] = np.nan
+
+    def mediana_por(*columnas):
+        return prueba.groupby(list(columnas))["price"].transform("median")
+
+    metodos = {
+        "media global": prueba["price"].fillna(prueba["price"].mean()),
+        "mediana global": prueba["price"].fillna(prueba["price"].median()),
+        "mediana por país": prueba["price"].fillna(mediana_por("country")),
+        "mediana por variedad": prueba["price"].fillna(mediana_por("variety")),
+        "mediana por país+variedad": prueba["price"].fillna(mediana_por("country", "variety")),
+        "mediana por país+variedad+puntaje": prueba["price"].fillna(
+            mediana_por("country", "variety", "points")),
+    }
+
+    filas = {}
+    for nombre, estimado in metodos.items():
+        # si un grupo se quedó sin precios, uso la mediana general
+        error = estimado.fillna(prueba["price"].median()).loc[ocultar] - real
+        filas[nombre] = {
+            "MAE": error.abs().mean(),
+            "error_mediano": error.abs().median(),
+            "MAPE_%": (error.abs() / real * 100).median(),
+        }
+    return pd.DataFrame(filas).T.round(2)
+
+
+def imputar_precio(df):
+    """Completa price con la mediana del grupo país + variedad + puntaje.
+
+    Fue el método que mejor dio en la validación (error medio de $14,92 contra
+    $21,96 de la mediana general). Si el grupo no tiene datos, uso uno más
+    general. En price_imputado queda marcado qué precios completé yo.
+    """
+    df = df.copy()
+    df["price_imputado"] = df["price"].isna()
+
+    def mediana_por(*columnas):
+        return df.groupby(list(columnas))["price"].transform("median")
+
+    df["price"] = (df["price"]
+                   .fillna(mediana_por("country", "variety", "points"))
+                   .fillna(mediana_por("country", "variety"))
+                   .fillna(mediana_por("variety"))
+                   .fillna(mediana_por("country"))
+                   .fillna(df["price"].median()))
+    return df
+
+
+def tratar_faltantes(df):
+    """Pone las etiquetas en las categóricas y después imputa el precio (no borro filas)."""
+    df = df.copy()
+    for col, etiqueta in ETIQUETAS_FALTANTES.items():
+        df[col] = df[col].fillna(etiqueta)
+    return imputar_precio(df)
+
+
+# ===========================================================================
+# 5. DATOS ATÍPICOS
+# ===========================================================================
+
+# Un precio me parece sospechoso si es más de 10 veces la mediana de sus pares.
+# El percentil 99,9 de ese cociente es 7,3, así que con 10 no marco precios normales.
+UMBRAL_RATIO = 10
+# Con menos de 30 vinos en el grupo la mediana no es confiable
+MINIMO_PARES = 30
 
 
 def detectar_atipicos(df):
-    """Compara métodos de detección de atípicos sobre las variables numéricas.
+    """Porcentaje de valores que marca como atípicos cada uno de cuatro criterios.
 
-    Se aplican cuatro criterios a propósito, porque discrepan y la discrepancia
-    es el hallazgo:
-
-    - IQR clásico: asume distribución aproximadamente simétrica. Sobre `price`
-      marca el 6,2% de los datos, lo que no describe casos excepcionales sino
-      la cola natural de una distribución asimétrica.
-    - z-score: asume normalidad, y además usa media y desvío, que son
-      justamente los estadísticos que los atípicos distorsionan. El resultado
-      es circular y sub-detecta.
-    - z modificado sobre la MAD: reemplaza media y desvío por mediana y
-      desviación absoluta mediana, que los valores extremos no arrastran.
-    - IQR sobre log(price): aplica el criterio sobre la escala en la que la
-      variable sí es simétrica. Es el más defendible para esta variable.
-
-    Sólo se usan precios observados: incluir los imputados mezclaría valores
-    sintéticos, que por construcción están cerca de la mediana de su grupo y
-    nunca serían atípicos.
+    Uso solo los precios observados, porque los imputados están cerca de la
+    mediana y nunca van a salir como atípicos.
     """
     observados = df[~df["price_imputado"]]
     filas = {}
-
     for variable in ["price", "points"]:
         x = observados[variable]
         q1, q3 = x.quantile([0.25, 0.75])
@@ -705,80 +482,51 @@ def detectar_atipicos(df):
             "IQR sobre log(x)": ((log_x < lq1 - 1.5 * liqr)
                                  | (log_x > lq3 + 1.5 * liqr)).mean() * 100,
         }
+    return pd.DataFrame(filas).round(2)
 
-    return pd.DataFrame(filas).round(2).rename_axis("% marcado como atípico")
+
+def ratio_contra_pares(observados):
+    """Divide cada precio por la mediana de los vinos de su provincia y puntaje."""
+    grupo = observados.groupby(["province", "points"])["price"]
+    mediana = grupo.transform("median")
+    confiable = grupo.transform("size") >= MINIMO_PARES
+    return (observados["price"] / mediana)[confiable], mediana
 
 
-def atipicos_contextuales(df, umbral=UMBRAL_RATIO_PARES):
-    """Identifica precios implausibles comparando cada vino con sus pares.
+def atipicos_contextuales(df, umbral=UMBRAL_RATIO):
+    """Vinos con un precio muy alto comparado con vinos parecidos.
 
-    Los métodos estadísticos del apartado anterior sólo responden "¿es un valor
-    extremo?". La pregunta que pide la consigna es otra: "¿es un error?". Y esa
-    no se contesta mirando la distribución global, porque un Château Pétrus a
-    $2.500 es extremo y correcto, mientras que un Médoc corriente a $3.300 es
-    igual de extremo y es un error de carga.
-
-    La diferencia sólo aparece en contexto. Se compara cada precio con la
-    mediana de su grupo de pares, o sea los vinos de la misma provincia y el
-    mismo puntaje, y se reporta el cociente. Un vino caro entre vinos caros da un ratio cercano a
-    1; un vino caro entre vinos baratos se delata.
-
-    Devuelve los casos por encima del umbral, ordenados por ratio, para
-    inspección manual. Es deliberado que no los corrija de forma automática:
-    decidir si un precio es erróneo requiere criterio, y la función entrega la
-    evidencia para ejercerlo.
+    Un Pétrus a $2.500 es caro pero real, y un Médoc común a $3.300 no tiene
+    sentido. Para diferenciarlos comparo con sus pares. Los casos quedan para
+    revisarlos a mano, no los corrijo solos.
     """
     observados = df[~df["price_imputado"]]
-    grupo = observados.groupby(["province", "points"], observed=True)["price"]
-    mediana_pares = grupo.transform("median")
-    tamaño = grupo.transform("size")
-
-    confiable = tamaño >= MINIMO_GRUPO_PARES
-    ratio = (observados["price"] / mediana_pares)[confiable]
+    ratio, mediana = ratio_contra_pares(observados)
 
     sospechosos = observados.loc[ratio[ratio > umbral].index].copy()
-    sospechosos["mediana_pares"] = mediana_pares[sospechosos.index]
+    sospechosos["mediana_pares"] = mediana[sospechosos.index]
     sospechosos["ratio"] = ratio[sospechosos.index].round(1)
-
     columnas = ["title", "province", "points", "price", "mediana_pares", "ratio"]
     return sospechosos[columnas].sort_values("ratio", ascending=False)
 
 
 def impacto_atipicos(df):
-    """Mide cómo cambia la relación precio-puntaje según se traten los atípicos.
+    """Correlación entre precio y puntaje con atípicos, sin ellos y con log(precio).
 
-    Es la parte de la consigna que pide analizar cómo los valores atípicos
-    afectan las decisiones basadas en los datos, y el resultado es contundente.
-
-    Pearson mide asociación *lineal*, así que sobre un precio con asimetría 18
-    subestima la relación real. Spearman trabaja sobre rangos y es insensible a
-    la escala, por eso apenas se mueve entre escenarios: es la referencia
-    robusta contra la cual comparar.
-
-    La conclusión práctica es que eliminar atípicos y transformar la escala no
-    son dos caminos igual de buenos hacia el mismo lugar. Descartar los precios
-    altos sube el Pearson pero elimina decenas de miles de vinos reales; el
-    logaritmo alcanza un valor todavía mayor sin perder una sola observación.
-    Para esta variable, la respuesta correcta a la asimetría es cambiar de
-    escala, no recortar los datos.
-
-    Se excluye del cálculo el precio imputado, que se generó usando `points` y
-    por lo tanto inflaría artificialmente cualquier correlación con esa misma
-    variable.
+    Así veo si conviene sacar los atípicos o cambiar de escala. Uso solo precios
+    observados porque los imputados se calcularon a partir de points.
     """
     observados = df[~df["price_imputado"]]
     precio, puntaje = observados["price"], observados["points"]
 
     q1, q3 = precio.quantile([0.25, 0.75])
-    limite = q3 + 1.5 * (q3 - q1)
-    recortado = observados[precio <= limite]
+    recortado = observados[precio <= q3 + 1.5 * (q3 - q1)]
 
     escenarios = {
         "precio crudo, con atípicos": (precio, puntaje),
         "precio crudo, sin atípicos (IQR)": (recortado["price"], recortado["points"]),
         "log(precio), con atípicos": (np.log(precio), puntaje),
     }
-
     filas = {}
     for nombre, (x, y) in escenarios.items():
         filas[nombre] = {
@@ -792,30 +540,18 @@ def impacto_atipicos(df):
 
 
 def grafico_atipicos(df):
-    """Panorama de los atípicos de precio y del criterio usado para juzgarlos.
-
-    Izquierda: la cola de precios en escala logarítmica, con los umbrales de
-    los dos criterios que más discrepan, para hacer visible que sobre una
-    variable asimétrica el IQR clásico marca la cola entera y no casos raros.
-
-    Derecha: la distribución del cociente contra el grupo de pares. Es el
-    gráfico que justifica el umbral elegido, porque muestra que la masa se
-    concentra alrededor de 1 y que por encima de 10 quedan unos pocos casos
-    separados del resto.
-    """
+    """Izquierda: dónde corta cada criterio en el precio. Derecha: cociente con los pares."""
     observados = df[~df["price_imputado"]]
     precio = observados["price"]
 
-    fig, (izq, der) = plt.subplots(1, 2, figsize=(13, 4.5))
-
     q1, q3 = precio.quantile([0.25, 0.75])
     limite_iqr = q3 + 1.5 * (q3 - q1)
-    log_p = np.log(precio)
-    lq1, lq3 = log_p.quantile([0.25, 0.75])
+    lq1, lq3 = np.log(precio).quantile([0.25, 0.75])
     limite_log = np.exp(lq3 + 1.5 * (lq3 - lq1))
 
-    izq.hist(precio, bins=np.logspace(np.log10(precio.min()),
-                                      np.log10(precio.max()), 70),
+    fig, (izq, der) = plt.subplots(1, 2, figsize=(13, 4.5))
+
+    izq.hist(precio, bins=np.logspace(np.log10(precio.min()), np.log10(precio.max()), 70),
              color="#3d5a6c", edgecolor="white")
     izq.set_xscale("log")
     izq.axvline(limite_iqr, color="#c8102e", ls="--",
@@ -823,101 +559,56 @@ def grafico_atipicos(df):
     izq.axvline(limite_log, color="#e07a00", ls="--",
                 label=f"IQR sobre log: ${limite_log:.0f} ({(precio > limite_log).mean() * 100:.1f}%)")
     izq.set(xlabel="Precio (USD, escala log)", ylabel="Cantidad de reseñas",
-            title="Dos criterios, seis veces de diferencia")
+            title="Umbrales de atípicos en el precio")
     izq.legend(fontsize=8)
 
-    grupo = observados.groupby(["province", "points"], observed=True)["price"]
-    ratio = (observados["price"] / grupo.transform("median"))[
-        grupo.transform("size") >= MINIMO_GRUPO_PARES]
-
+    ratio, _ = ratio_contra_pares(observados)
     der.hist(ratio, bins=np.logspace(np.log10(ratio.min()), np.log10(ratio.max()), 70),
              color="#7b2d43", edgecolor="white")
     der.set_xscale("log")
     der.set_yscale("log")
-    der.axvline(UMBRAL_RATIO_PARES, color="#c8102e", ls="--",
-                label=f"umbral {UMBRAL_RATIO_PARES}x ({(ratio > UMBRAL_RATIO_PARES).sum()} casos)")
-    der.set(xlabel="Precio / mediana del grupo de pares (provincia + puntaje)",
-            ylabel="Cantidad de reseñas",
-            title="Contra los pares, los errores se separan del resto")
+    der.axvline(UMBRAL_RATIO, color="#c8102e", ls="--",
+                label=f"umbral {UMBRAL_RATIO}x ({(ratio > UMBRAL_RATIO).sum()} casos)")
+    der.set(xlabel="Precio / mediana de los pares (provincia + puntaje)",
+            ylabel="Cantidad de reseñas", title="Precio comparado con sus pares")
     der.legend(fontsize=8)
 
     fig.tight_layout()
-    return _guardar(fig, "07_atipicos")
+    return guardar_figura(fig, "07_atipicos")
 
 
 # ===========================================================================
 # 6. ANÁLISIS COMPARATIVO
 # ===========================================================================
 
-# Mínimo de reseñas para que un grupo entre en una comparación. Sin este filtro
-# los rankings los encabezan grupos de tres observaciones por puro azar
-# muestral, y la comparación deja de significar algo.
+# Mínimo de reseñas para que un grupo entre en las comparaciones
 MINIMO_GRUPO = 200
-
-# La extracción del sitio es de 2017: cosechas posteriores serían imposibles.
-ANIO_MAXIMO = 2017
-ANIO_MINIMO = 1900
 
 
 def extraer_anio(df):
-    """Deriva el año de cosecha desde `title` y lo agrega como columna.
+    """Saca el año de cosecha del título.
 
-    El título sigue el formato "<bodega> <año> <nombre del vino> (<región>)",
-    así que el año está disponible aunque no exista como columna propia.
-
-    El detalle que arruina la extracción ingenua: muchas bodegas llevan un año
-    en su propio nombre. Un patrón aplicado al título completo devuelve 1852
-    para "Hazlitt 1852 Vineyards 2005 Cabernet Sauvignon", cuando la cosecha es
-    2005. Afecta a unos 150 vinos, suficientes para ensuciar cualquier análisis
-    temporal.
-
-    La solución aprovecha que el nombre de la bodega ya está en su propia
-    columna y que el título siempre empieza con él, cosa verificada sobre el
-    100% de las filas: se recorta ese prefijo y recién entonces se busca el año.
-
-    Las filas sin año son vinos espumantes rotulados "NV" (non-vintage), que
-    son mezclas de varias cosechas y legítimamente no tienen uno. Quedan como
-    nulos y no se imputan: inventarles un año sería fabricar un dato que no
-    existe.
+    Antes le saco el nombre de la bodega, porque algunas tienen un año en el
+    nombre ("Hazlitt 1852 Vineyards 2005 ..." daría 1852 y no 2005).
+    Los que no tienen año son espumantes "NV" y los dejo como nulos.
     """
     sin_bodega = [t[len(w):] if t.startswith(w) else t
                   for t, w in zip(df["title"], df["winery"])]
-
     anio = (pd.Series(sin_bodega, index=df.index)
               .str.extract(r"\b(19\d{2}|20[0-1]\d)\b")[0]
               .astype("Float64"))
-
-    # Descarta años imposibles que hayan sobrevivido al recorte del prefijo.
-    anio = anio.where(anio.between(ANIO_MINIMO, ANIO_MAXIMO))
-
+    anio = anio.where(anio.between(1900, 2017))  # el dataset es de 2017
     return df.assign(anio=anio.astype("Int64"))
 
 
 def agregar_longitud(df):
-    """Agrega la cantidad de palabras de cada nota de cata.
-
-    `description` es texto libre y no admite las frecuencias que se usan con las
-    demás variables, pero sí una medida simple: cuánto escribió el catador. Es
-    la única variable que se puede derivar de esa columna sin entrar en
-    procesamiento de lenguaje natural.
-
-    Interesa porque la extensión de una reseña no la decide el vino sino quien
-    la escribe, así que sirve para preguntar si los catadores se explayan más
-    con los vinos que puntúan alto.
-    """
+    """Agrega cuántas palabras tiene cada reseña."""
     return df.assign(palabras=df["description"].str.split().str.len())
 
 
 def analisis_longitud(df):
-    """Relación entre el largo de la reseña, el puntaje y el precio.
-
-    Devuelve las correlaciones y el promedio de palabras por tramo de puntaje.
-    Se usa Spearman además de Pearson porque el precio sigue siendo asimétrico,
-    y se trabaja sólo con precios observados para no medir contra valores
-    imputados.
-    """
-    datos = df[~df["price_imputado"]].dropna(subset=["palabras"])
-
+    """Correlación entre el largo de la reseña y el puntaje o el precio."""
+    datos = df[~df["price_imputado"]]
     correlaciones = pd.DataFrame({
         "Pearson": [stats.pearsonr(datos["palabras"], datos["points"])[0],
                     stats.pearsonr(datos["palabras"], np.log(datos["price"]))[0]],
@@ -926,24 +617,13 @@ def analisis_longitud(df):
     }, index=["palabras vs puntaje", "palabras vs precio"]).round(3)
 
     por_puntaje = (datos.groupby("points")["palabras"]
-                   .agg(reseñas="size", palabras_medias="mean")
-                   .round(1))
-
+                   .agg(reseñas="size", palabras_medias="mean").round(1))
     return correlaciones, por_puntaje
 
 
 def analisis_temporal(df, minimo=500):
-    """Puntaje y precio por año de cosecha.
-
-    Se descartan las cosechas con pocas reseñas porque las más antiguas sufren
-    un sesgo de supervivencia severo: de 1970 sólo se siguen reseñando los
-    pocos vinos excepcionales que aún se venden, mientras que de 2014 se reseña
-    la producción corriente. Comparar esas medias sin advertirlo llevaría a
-    concluir que los vinos viejos son mejores, cuando lo que cambió es el
-    criterio con el que llegaron a la muestra.
-    """
-    con_anio = df.dropna(subset=["anio"])
-    resumen = con_anio.groupby("anio", observed=True).agg(
+    """Puntaje medio y precio mediano por cosecha (años con 500 reseñas o más)."""
+    resumen = df.dropna(subset=["anio"]).groupby("anio").agg(
         reseñas=("points", "size"),
         puntaje_medio=("points", "mean"),
         precio_mediano=("price", "median"),
@@ -952,37 +632,21 @@ def analisis_temporal(df, minimo=500):
 
 
 def efecto_catador(df, minimo=1500):
-    """Separa la severidad del catador de los vinos que le tocaron reseñar.
+    """Promedio de cada catador, crudo y controlando por país y variedad.
 
-    Comparar las medias crudas de los catadores sugiere diferencias enormes de
-    criterio: 86,9 para el más bajo contra 90,6 para el más alto, una brecha
-    mayor que el desvío estándar de toda la variable.
-
-    Pero los catadores no se reparten los vinos al azar: cada uno cubre las
-    regiones de su especialidad. El de media más baja reseña 43% España y 29%
-    Chile; la de media más alta, 60% Austria y 38% Francia. La diferencia de
-    puntajes puede ser entonces de los vinos y no de quien los juzga.
-
-    Para separarlo se mide, para cada reseña, cuánto se aparta del promedio de
-    su propio grupo de país y variedad. Ese desvío responde la pregunta
-    correcta: frente al mismo tipo de vino, ¿este catador puntúa por encima o
-    por debajo de lo habitual?
-
-    La brecha de 3,77 puntos cae a 0,78, y el catador que parecía el más severo
-    puntúa en el promedio exacto (-0,02). Casi toda la diferencia venía de qué
-    vinos le tocaban, no de su criterio. Es confusión por una variable omitida,
-    y comparar las medias crudas habría llevado a una conclusión equivocada
-    sobre el trabajo de personas con nombre y apellido.
+    Cada catador reseña vinos de ciertas regiones, así que su promedio crudo
+    mezcla su criterio con los vinos que le tocaron. Para separar eso, mido
+    cuánto se aleja cada reseña del promedio de los vinos del mismo país y
+    variedad.
     """
     conocidos = df[df["taster_name"] != ETIQUETAS_FALTANTES["taster_name"]]
-    grupo = conocidos.groupby(["country", "variety"], observed=True)["points"]
+    grupo = conocidos.groupby(["country", "variety"])["points"]
     desvio = (conocidos["points"] - grupo.transform("mean"))[
         grupo.transform("size") >= MINIMO_GRUPO]
 
-    crudo = conocidos.groupby("taster_name", observed=True)["points"].agg(
+    crudo = conocidos.groupby("taster_name")["points"].agg(
         reseñas="size", media_cruda="mean")
-    controlado = (conocidos.loc[desvio.index].assign(_d=desvio)
-                  .groupby("taster_name", observed=True)["_d"]
+    controlado = (desvio.groupby(conocidos.loc[desvio.index, "taster_name"])
                   .agg(comparables="size", desvio_controlado="mean"))
 
     resultado = crudo.join(controlado)
@@ -990,73 +654,37 @@ def efecto_catador(df, minimo=1500):
     return resultado.sort_values("media_cruda", ascending=False).round(2)
 
 
-def mejor_relacion_calidad_precio(df, n=12):
-    """Variedades con mejor puntaje relativo a su precio.
-
-    Se compara la mediana de puntaje contra la mediana de precio por variedad,
-    sobre precios observados y con un mínimo de reseñas por grupo. La mediana
-    de precio, y no la media, porque dentro de cada variedad la asimetría sigue
-    siendo fuerte.
-
-    El indicador es descriptivo y no una recomendación de compra: mide qué
-    variedades concentran puntajes altos en rangos de precio bajos, que es una
-    característica del segmento de mercado, no una medida de calidad absoluta.
-    """
-    observados = df[~df["price_imputado"]]
-    resumen = observados.groupby("variety", observed=True).agg(
-        reseñas=("points", "size"),
-        puntaje_mediano=("points", "median"),
-        precio_mediano=("price", "median"),
-    )
-    resumen = resumen[resumen["reseñas"] >= MINIMO_GRUPO]
-    resumen["puntos_por_dolar"] = (resumen["puntaje_mediano"]
-                                   / resumen["precio_mediano"]).round(2)
-    return resumen.sort_values("puntos_por_dolar", ascending=False).head(n)
-
-
 def grafico_comparativo(df):
-    """Dos comparaciones que sostienen las conclusiones del análisis.
-
-    Izquierda: evolución del puntaje medio por cosecha, con el tamaño de
-    muestra en el eje secundario. Las dos series van juntas para que se vea que
-    los tramos más volátiles son justamente los de menos reseñas.
-
-    Derecha: el efecto catador antes y después de controlar por país y
-    variedad. Es la figura que muestra el hallazgo central del apartado: las
-    barras crudas se despliegan sobre casi cuatro puntos y las controladas se
-    comprimen alrededor de cero.
-    """
+    """Izquierda: puntaje medio por cosecha. Derecha: efecto del catador."""
     fig, (izq, der) = plt.subplots(1, 2, figsize=(14, 5))
 
     temporal = analisis_temporal(df)
-    izq.plot(temporal.index.astype(int), temporal["puntaje_medio"],
-             color="#7b2d43", marker="o", ms=4, label="puntaje medio")
+    anios = temporal.index.astype(int)
+    izq.plot(anios, temporal["puntaje_medio"], color="#7b2d43", marker="o", ms=4,
+             label="puntaje medio")
     izq.set(xlabel="Año de cosecha", ylabel="Puntaje medio",
-            title="Puntaje por cosecha y tamaño de muestra")
+            title="Puntaje medio por cosecha")
     izq.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
     volumen = izq.twinx()
-    volumen.fill_between(temporal.index.astype(int), temporal["reseñas"],
-                         color="#3d5a6c", alpha=0.18)
+    volumen.fill_between(anios, temporal["reseñas"], color="#3d5a6c", alpha=0.18)
     volumen.set_ylabel("Reseñas (área)")
     izq.legend(loc="upper left", fontsize=8)
 
     catadores = efecto_catador(df).sort_values("media_cruda")
-    etiquetas = [n.split()[0] if n else n for n in catadores.index]
     posicion = np.arange(len(catadores))
-
     der.barh(posicion - 0.2, catadores["media_cruda"] - df["points"].mean(),
              height=0.4, color="#7b2d43", label="media cruda (vs media general)")
     der.barh(posicion + 0.2, catadores["desvio_controlado"], height=0.4,
              color="#e07a00", label="controlado por país y variedad")
     der.axvline(0, color="black", lw=0.8)
     der.set_yticks(posicion)
-    der.set_yticklabels(etiquetas, fontsize=8)
-    der.set(xlabel="Desvío en puntos respecto del promedio",
-            title="La severidad aparente era asignación de vinos")
+    der.set_yticklabels([n.split()[0] for n in catadores.index], fontsize=8)
+    der.set(xlabel="Diferencia en puntos respecto del promedio",
+            title="Efecto del catador")
     der.legend(fontsize=8)
 
     fig.tight_layout()
-    return _guardar(fig, "08_comparativo")
+    return guardar_figura(fig, "08_comparativo")
 
 
 # ===========================================================================
@@ -1064,82 +692,82 @@ def grafico_comparativo(df):
 # ===========================================================================
 
 if __name__ == "__main__":
-    # Sin backend interactivo: el script guarda las figuras en graficos/ en vez
-    # de abrir ventanas, para que pueda correrse de punta a punta sin bloquearse.
-    import matplotlib
-    matplotlib.use("Agg")
-
+    # --- 1. Carga ---
     vinos = cargar_datos()
     print(f"Dataset cargado: {vinos.shape[0]:,} reseñas x {vinos.shape[1]} columnas")
+    print(vinos.dtypes.to_string())
 
+    # --- 2. Estructura y resumen ---
     print("\n--- Perfil de columnas ---")
     print(perfil_columnas(vinos).to_string())
 
-    print("\n--- Depuración ---")
+    print("\n--- Duplicados ---")
     vinos = quitar_duplicados(vinos)
 
-    print("\n--- Resumen estadístico de las variables categóricas ---")
+    print("\n--- Resumen de variables numéricas ---")
+    print(resumen_numericas(vinos).to_string())
+
+    print("\n--- Resumen de variables categóricas ---")
     print(resumen_categoricas(vinos).to_string())
 
-    # Estos gráficos se generan ANTES del tratamiento de faltantes: el mapa de
-    # nulos necesita ver los nulos, y los demás describen los datos tal como
-    # llegaron, sin valores imputados mezclados.
-    print("\n--- Gráficos sobre los datos sin imputar ---")
+    # --- 3. Gráficos (antes de imputar, para que muestren los datos originales) ---
     for funcion in (grafico_puntajes, grafico_precios, grafico_categoricas,
                     grafico_precio_vs_puntaje, grafico_puntaje_por_pais,
                     grafico_faltantes):
         funcion(vinos)
         plt.close("all")
 
-    print("\n--- Faltantes: diagnóstico del mecanismo ---")
-    por_pais, por_puntaje = diagnostico_faltantes(vinos)
-    print("Precio ausente por país (n >= 1000):")
-    print(por_pais.head(6).to_string())
-    print(f"\nPrecio ausente según puntaje: {por_puntaje.loc[80]}% en 80 "
-          f"-> {por_puntaje.loc[99]}% en 99")
-    print("La ausencia depende de variables observadas: el mecanismo es MAR.")
+    # --- 4. Faltantes ---
+    print("\n--- Faltantes por columna (sin duplicados) ---")
+    faltantes = vinos.isna().sum()
+    print(pd.DataFrame({"faltantes": faltantes,
+                        "%": (faltantes / len(vinos) * 100).round(2)})
+          .query("faltantes > 0").sort_values("faltantes", ascending=False).to_string())
 
-    print("\n--- Faltantes: validación de estrategias de imputación ---")
+    por_pais, por_puntaje = diagnostico_faltantes(vinos)
+    print("\nPrecio faltante por país (países con al menos 1000 reseñas):")
+    print(por_pais.to_string())
+    print(f"\nPrecio faltante según puntaje: {por_puntaje.loc[80]}% en 80 "
+          f"-> {por_puntaje.loc[99]}% en 99")
+
+    print("\n--- Validación de métodos de imputación ---")
     print(validar_imputacion_precio(vinos).to_string())
 
-    print("\n--- Faltantes: tratamiento aplicado ---")
     vinos = tratar_faltantes(vinos)
-    print(f"Precios imputados: {vinos['price_imputado'].sum():,} "
+    print(f"\nPrecios imputados: {vinos['price_imputado'].sum():,} "
           f"({vinos['price_imputado'].mean() * 100:.1f}%)")
-    print(f"Nulos restantes en el dataset: {vinos.isna().sum().sum()}")
+    print(f"Nulos restantes: {vinos.isna().sum().sum()}")
 
-    print("\n--- Atípicos: comparación de criterios de detección ---")
+    # --- 5. Atípicos ---
+    print("\n--- Atípicos: porcentaje marcado por cada criterio ---")
     print(detectar_atipicos(vinos).to_string())
 
-    print("\n--- Atípicos: precios implausibles contra su grupo de pares ---")
+    print("\n--- Atípicos: precios muy altos contra sus pares ---")
     print(atipicos_contextuales(vinos).head(6).to_string(index=False))
 
-    print("\n--- Atípicos: impacto sobre la relación precio-puntaje ---")
+    print("\n--- Atípicos: impacto en la correlación precio-puntaje ---")
     print(impacto_atipicos(vinos).to_string())
 
-    # Este gráfico va después del tratamiento porque necesita `price_imputado`
-    # para excluir los valores sintéticos del análisis de atípicos.
     grafico_atipicos(vinos)
     plt.close("all")
 
-    print("\n--- Comparativo: año de cosecha derivado del título ---")
+    # --- 6. Comparativo ---
     vinos = extraer_anio(vinos)
-    print(f"Año extraído en {vinos['anio'].notna().sum():,} reseñas "
-          f"({vinos['anio'].isna().mean() * 100:.1f}% son espumantes sin cosecha)")
+    print(f"\nAño extraído en {vinos['anio'].notna().sum():,} reseñas "
+          f"({vinos['anio'].isna().mean() * 100:.1f}% sin año)")
     print(analisis_temporal(vinos).tail(10).to_string())
 
-    print("\n--- Comparativo: efecto catador, crudo contra controlado ---")
+    print("\n--- Efecto del catador ---")
     print(efecto_catador(vinos).to_string())
 
-    print("\n--- Comparativo: variedades con mejor puntaje por dólar ---")
-    print(mejor_relacion_calidad_precio(vinos).to_string())
-
-    print("\n--- Comparativo: largo de la reseña ---")
+    print("\n--- Largo de la reseña ---")
     vinos = agregar_longitud(vinos)
-    correlaciones, palabras_por_puntaje = analisis_longitud(vinos)
+    correlaciones, por_puntaje = analisis_longitud(vinos)
     print(correlaciones.to_string())
-    print(f"\nDe {palabras_por_puntaje.loc[80, 'palabras_medias']:.0f} palabras en 80 puntos "
-          f"a {palabras_por_puntaje.loc[100, 'palabras_medias']:.0f} en 100.")
+    print(f"\nPalabras promedio: {vinos['palabras'].mean():.0f} "
+          f"(mín {vinos['palabras'].min()}, máx {vinos['palabras'].max()})")
+    print(f"De {por_puntaje.loc[80, 'palabras_medias']:.0f} palabras en 80 puntos "
+          f"a {por_puntaje.loc[100, 'palabras_medias']:.0f} en 100")
 
     grafico_comparativo(vinos)
     plt.close("all")
