@@ -3,7 +3,8 @@ TP2 - Seminario de Programación para Ciencia de Datos
 Análisis exploratorio de las reseñas de vinos de WineEnthusiast.
 Lucas Llano
 
-Necesita pandas, numpy, matplotlib y scipy.
+Necesita pandas, numpy, matplotlib y scipy (y openpyxl si se usa el .xlsx).
+El archivo de datos tiene que estar en la misma carpeta que este script.
 Para correrlo: python analisis_exploratorio_vinos.py
 """
 
@@ -17,14 +18,21 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+# Busco todo en la carpeta del script, así anda aunque se ejecute desde otro lado
+CARPETA = Path(__file__).resolve().parent
+
 # Uso el primer archivo que encuentre. El .xlsx es el que vino con el enunciado:
 # es el mismo CSV, pero se rompió al abrirlo en Excel (ver sección 1).
 RUTAS_POSIBLES = [
-    "winemag-data-130k-v2.csv",
-    "Entregable 2 - Documentación extra.xlsx",
+    CARPETA / "winemag-data-130k-v2.csv",
+    CARPETA / "Entregable 2 - Documentación extra.xlsx",
 ]
 
-DIR_GRAFICOS = Path("graficos")
+DIR_GRAFICOS = CARPETA / "graficos"
+
+COLUMNAS = ["country", "description", "designation", "points", "price", "province",
+            "region_1", "region_2", "taster_name", "taster_twitter_handle", "title",
+            "variety", "winery"]
 
 
 # ===========================================================================
@@ -84,26 +92,31 @@ def arreglar_codificacion(texto):
 def buscar_archivo():
     """Devuelve el primer archivo de datos que encuentre en la carpeta."""
     for ruta in RUTAS_POSIBLES:
-        if Path(ruta).exists():
+        if ruta.exists():
             return ruta
-    raise FileNotFoundError("No encontré ninguno de: " + ", ".join(RUTAS_POSIBLES))
+    raise FileNotFoundError("No encontré ninguno de estos archivos en " + str(CARPETA)
+                            + ": " + ", ".join(r.name for r in RUTAS_POSIBLES))
 
 
 def cargar_datos(ruta=None):
     """Carga el dataset (el CSV o el .xlsx roto) y revisa que haya quedado bien."""
-    ruta = ruta or buscar_archivo()
+    ruta = Path(ruta) if ruta else buscar_archivo()
 
-    # index_col=0 porque la primera columna es un índice que quedó del CSV
-    if str(ruta).lower().endswith(".csv"):
-        df = pd.read_csv(ruta, index_col=0)
+    if ruta.suffix.lower() == ".csv":
+        df = pd.read_csv(ruta)
     else:
-        df = pd.read_csv(io.StringIO(reconstruir_csv(ruta)), index_col=0)
+        df = pd.read_csv(io.StringIO(reconstruir_csv(ruta)))
+        # los acentos solo vienen rotos en el .xlsx
+        for col in df.select_dtypes(exclude="number").columns:
+            df[col] = df[col].map(arreglar_codificacion)
 
-    for col in df.select_dtypes(exclude="number").columns:
-        df[col] = df[col].map(arreglar_codificacion)
+    # La primera columna sin nombre es un índice que quedó al exportar el CSV
+    if df.columns[0].startswith("Unnamed"):
+        df = df.set_index(df.columns[0]).rename_axis(None)
 
-    # Que no tire error no quiere decir que esté bien, así que reviso forma y tipos
-    assert df.shape == (129971, 13), f"shape inesperado: {df.shape}"
+    # Que no tire error no quiere decir que esté bien, así que reviso columnas y tipos
+    faltan = set(COLUMNAS) - set(df.columns)
+    assert not faltan, f"faltan columnas: {faltan}"
     assert df["points"].dtype.kind == "i", "points debería ser entero"
     assert df["price"].dtype.kind == "f", "price debería ser float"
     return df
@@ -140,8 +153,8 @@ def quitar_duplicados(df):
 def resumen_numericas(df):
     """Resumen de points y price.
 
-    Además de lo que da describe() agrego el IQR, la asimetría y la curtosis
-    para ver qué forma tiene cada distribución.
+    Además de lo que da describe() agrego el IQR y la asimetría, para ver si
+    conviene resumir cada variable con la media o con la mediana.
     """
     num = df[["points", "price"]]
     return pd.DataFrame({
@@ -152,17 +165,14 @@ def resumen_numericas(df):
         "max": num.max(),
         "IQR": num.quantile(0.75) - num.quantile(0.25),
         "asimetria": num.skew(),
-        "curtosis": num.kurt(),
-        "coef_variacion": num.std() / num.mean(),
     }).T.round(2)
 
 
 def resumen_categoricas(df):
-    """Moda, cuánto pesa la moda y entropía de las variables categóricas.
+    """Moda, cuánto pesa la moda y cuánto suman las 10 categorías más comunes.
 
-    La entropía normalizada va de 0 (todas las reseñas en una categoría) a 1
-    (repartidas en partes iguales). La uso para comparar qué tan concentrada
-    está cada variable. description y title no entran porque son texto libre.
+    Con eso se ve qué tan concentrada está cada variable. description y title
+    no entran porque son texto libre.
     """
     columnas = ["country", "province", "region_1", "region_2", "variety",
                 "winery", "designation", "taster_name"]
@@ -170,13 +180,11 @@ def resumen_categoricas(df):
     for col in columnas:
         frec = df[col].value_counts()
         prop = frec / frec.sum()
-        entropia = -(prop * np.log(prop)).sum() / np.log(len(frec))
         filas[col] = {
             "categorías": len(frec),
             "moda": frec.index[0],
             "moda_%": round(prop.iloc[0] * 100, 1),
             "top10_%": round(prop.head(10).sum() * 100, 1),
-            "entropía": round(entropia, 3),
         }
     return pd.DataFrame(filas).T
 
@@ -296,40 +304,17 @@ def grafico_puntaje_por_pais(df, n=12, minimo=500):
 
 
 def grafico_faltantes(df):
-    """Porcentaje de nulos por columna, y qué columnas suelen faltar juntas."""
-    nulos = df[df.columns[df.isna().any()]].isna()
-    orden = nulos.mean().sort_values(ascending=False).index
-    nulos = nulos[orden]
+    """Gráfico de barras con el porcentaje de nulos de cada columna."""
+    pct = (df.isna().mean() * 100).sort_values()
+    pct = pct[pct > 0]
 
-    fig, (izq, der) = plt.subplots(1, 2, figsize=(14, 5),
-                                   gridspec_kw={"width_ratios": [1, 1.2]})
-
-    pct = nulos.mean() * 100
-    izq.barh(range(len(pct)), pct.values, color="#7b2d43")
-    izq.set_yticks(range(len(pct)))
-    izq.set_yticklabels(pct.index, fontsize=9)
-    izq.invert_yaxis()
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.barh(pct.index, pct.values, color="#7b2d43")
     for i, v in enumerate(pct.values):
-        izq.text(v + 1, i, f"{v:.1f}%", va="center", fontsize=8)
-    izq.set(xlabel="% de valores faltantes", title="Faltantes por columna",
-            xlim=(0, pct.max() * 1.25))
-
-    # Se lee por fila: cuando falta la variable de la fila, qué proporción de
-    # las veces falta también la de la columna.
-    cond = pd.DataFrame(
-        {b: [nulos[b][nulos[a]].mean() for a in orden] for b in orden}, index=orden)
-    im = der.imshow(cond.values, cmap="RdPu", vmin=0, vmax=1)
-    der.set_xticks(range(len(orden)))
-    der.set_xticklabels(orden, rotation=45, ha="right", fontsize=8)
-    der.set_yticks(range(len(orden)))
-    der.set_yticklabels(orden, fontsize=8)
-    for i in range(len(orden)):
-        for j in range(len(orden)):
-            v = cond.values[i, j]
-            der.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=7,
-                     color="white" if v > 0.6 else "black")
-    der.set_title("P(falta la columna | falta la fila)")
-    fig.colorbar(im, ax=der, shrink=0.8)
+        ax.text(v + 1, i, f"{v:.1f}%", va="center", fontsize=8)
+    ax.set(xlabel="% de valores faltantes", title="Faltantes por columna",
+           xlim=(0, pct.max() * 1.2))
+    ax.tick_params(axis="y", labelsize=9)
 
     fig.tight_layout()
     return guardar_figura(fig, "06_faltantes")
@@ -410,7 +395,7 @@ def validar_imputacion_precio(df, semilla=42):
         filas[nombre] = {
             "MAE": error.abs().mean(),
             "error_mediano": error.abs().median(),
-            "MAPE_%": (error.abs() / real * 100).median(),
+            "error_%_mediano": (error.abs() / real * 100).median(),
         }
     return pd.DataFrame(filas).T.round(2)
 
@@ -449,38 +434,34 @@ def tratar_faltantes(df):
 # 5. DATOS ATÍPICOS
 # ===========================================================================
 
-# Un precio me parece sospechoso si es más de 10 veces la mediana de sus pares.
-# El percentil 99,9 de ese cociente es 7,3, así que con 10 no marco precios normales.
+# Un precio me parece sospechoso si es más de 10 veces la mediana de sus pares:
+# que un vino cueste diez veces lo que cuestan vinos parecidos es muy raro.
 UMBRAL_RATIO = 10
 # Con menos de 30 vinos en el grupo la mediana no es confiable
 MINIMO_PARES = 30
 
 
 def detectar_atipicos(df):
-    """Porcentaje de valores que marca como atípicos cada uno de cuatro criterios.
+    """Porcentaje de valores que el IQR marca como atípicos.
 
+    Uso el IQR porque trabaja con cuartiles, que no se mueven por los valores
+    extremos, y no hace falta que los datos sean normales. Como el precio es muy
+    asimétrico, también lo aplico sobre el logaritmo.
     Uso solo los precios observados, porque los imputados están cerca de la
     mediana y nunca van a salir como atípicos.
     """
+    def pct_iqr(x):
+        q1, q3 = x.quantile([0.25, 0.75])
+        iqr = q3 - q1
+        return ((x < q1 - 1.5 * iqr) | (x > q3 + 1.5 * iqr)).mean() * 100
+
     observados = df[~df["price_imputado"]]
     filas = {}
     for variable in ["price", "points"]:
         x = observados[variable]
-        q1, q3 = x.quantile([0.25, 0.75])
-        iqr = q3 - q1
-        z = (x - x.mean()) / x.std()
-        mad = (x - x.median()).abs().median()
-        z_mod = 0.6745 * (x - x.median()) / mad
-        log_x = np.log(x)
-        lq1, lq3 = log_x.quantile([0.25, 0.75])
-        liqr = lq3 - lq1
-
         filas[variable] = {
-            "IQR clásico": ((x < q1 - 1.5 * iqr) | (x > q3 + 1.5 * iqr)).mean() * 100,
-            "z-score |z|>3": (z.abs() > 3).mean() * 100,
-            "z modificado (MAD) |z|>3.5": (z_mod.abs() > 3.5).mean() * 100,
-            "IQR sobre log(x)": ((log_x < lq1 - 1.5 * liqr)
-                                 | (log_x > lq3 + 1.5 * liqr)).mean() * 100,
+            "IQR": pct_iqr(x),
+            "IQR sobre log": pct_iqr(np.log(x)),
         }
     return pd.DataFrame(filas).round(2)
 
@@ -594,9 +575,8 @@ def extraer_anio(df):
     """
     sin_bodega = [t[len(w):] if t.startswith(w) else t
                   for t, w in zip(df["title"], df["winery"])]
-    anio = (pd.Series(sin_bodega, index=df.index)
-              .str.extract(r"\b(19\d{2}|20[0-1]\d)\b")[0]
-              .astype("Float64"))
+    anio = pd.to_numeric(pd.Series(sin_bodega, index=df.index)
+                         .str.extract(r"\b(19\d{2}|20[0-1]\d)\b")[0])
     anio = anio.where(anio.between(1900, 2017))  # el dataset es de 2017
     return df.assign(anio=anio.astype("Int64"))
 
@@ -724,6 +704,14 @@ if __name__ == "__main__":
                         "%": (faltantes / len(vinos) * 100).round(2)})
           .query("faltantes > 0").sort_values("faltantes", ascending=False).to_string())
 
+    # Columnas que faltan juntas
+    sin_catador = vinos["taster_name"].isna()
+    sin_precio = vinos["price"].isna()
+    pct_twitter = vinos.loc[sin_catador, "taster_twitter_handle"].isna().mean() * 100
+    pct_region = vinos.loc[sin_precio, "region_2"].isna().mean() * 100
+    print(f"\nDe las reseñas sin catador, el {pct_twitter:.0f}% tampoco tiene Twitter")
+    print(f"De las reseñas sin precio, el {pct_region:.0f}% tampoco tiene region_2")
+
     por_pais, por_puntaje = diagnostico_faltantes(vinos)
     print("\nPrecio faltante por país (países con al menos 1000 reseñas):")
     print(por_pais.to_string())
@@ -739,7 +727,7 @@ if __name__ == "__main__":
     print(f"Nulos restantes: {vinos.isna().sum().sum()}")
 
     # --- 5. Atípicos ---
-    print("\n--- Atípicos: porcentaje marcado por cada criterio ---")
+    print("\n--- Atípicos: porcentaje marcado por el IQR ---")
     print(detectar_atipicos(vinos).to_string())
 
     print("\n--- Atípicos: precios muy altos contra sus pares ---")
